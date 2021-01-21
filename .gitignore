@@ -1,4 +1,4 @@
-.DS_Store/
+.DS_Store
 .virtual_documents/
 .data/*fits.gz
-notebooks/.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints
