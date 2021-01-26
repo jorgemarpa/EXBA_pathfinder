@@ -5,6 +5,7 @@ import numpy as np
 import lightkurve as lk
 import matplotlib.pyplot as plt
 from matplotlib import colors
+from matplotlib import patches
 from tqdm.notebook import tqdm
 import astropy.units as u
 from astropy.time import Time
@@ -289,16 +290,16 @@ class EXBA(object):
 
         return ax
 
-    def plot_lightcurves(self, apertures=None):
+    def plot_lightcurves(self):
 
-        for s in range(0, len(sources), 5):
+        for s in range(0, len(self.sources), 5):
             if self.aperture_mask[s].sum() == 0:
                 print("Warning: zero pixels in aperture mask.")
                 continue
             fig, ax = plt.subplots(1, 2, figsize=(15,4),
                                    gridspec_kw={'width_ratios': [4, 1]})
 
-            self.exba_lcs[s].plot(label=self.exba_lcs[s].targetid, ax=ax[0])
+            self.sap_lcs[s].plot(label=self.sap_lcs[s].targetid, ax=ax[0])
 
             fig.suptitle('EXBA block | Q: %i | Ch: %i' %
                          (self.quarter, self.channel))
