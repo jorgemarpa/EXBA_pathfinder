@@ -25,11 +25,12 @@ def download_exba_files(file_list):
     # check file isnt empty
     print(len(urls))
 
-    for i, url in enumerate(urls[:100]):
-        print(url)
+    for i, url in enumerate(urls):
+        print('%i / %i : %s' % (i+1, len(urls), url))
         fname = url.split('/')[-1]
         out = '%s/data/temp/%s' % (main_path, fname)
-        if os.path.isfile(out):
+        out_tree = glob.glob('%s/data/EXBA/*/*/%s' % (main_path, fname))
+        if os.path.isfile(out) or len(out_tree) != 0:
             continue
         else:
             wget.download(url, out=out)
