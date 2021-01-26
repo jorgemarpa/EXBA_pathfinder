@@ -25,8 +25,9 @@ class EXBA(object):
 
         # load local TPFs files
         tpfs_paths = np.sort(
-            glob.glob("%s/data/EXBA/%s/%s/*_lpd-targ.fits.gz" %
-                      (main_path, channel, quarter))
+            glob.glob(
+                "%s/data/EXBA/%s/%s/*_lpd-targ.fits.gz" % (main_path, channel, quarter)
+            )
         )
 
         tpfs = lk.TargetPixelFileCollection(
@@ -69,20 +70,23 @@ class EXBA(object):
             unw.ravel(),
         )
         self.ra, self.dec = self._convert_to_wcs(tpfs, self.row, self.col)
-        self.ra_2d, self.dec_2d = (self.ra.reshape(self.row_2d.shape),
-                                   self.dec.reshape(self.row_2d.shape))
+        self.ra_2d, self.dec_2d = (
+            self.ra.reshape(self.row_2d.shape),
+            self.dec.reshape(self.row_2d.shape),
+        )
 
         # search Gaia sources in the sky
         sources = self._get_coord_and_query_gaia(
             self.ra, self.dec, self.unw, self.time[0], magnitude_limit=25
         )
-        sources['col'], sources['row'] = tpfs[0].wcs.wcs_world2pix(sources.ra,
-                                                                   sources.dec, 0.5)
-        sources['col'] += tpfs[0].column
-        sources['row'] += tpfs[0].row
-        self.sources, self.bad_sources = self._clean_source_list(sources,
-                                                            self.ra, self.dec)
-
+        sources["col"], sources["row"] = tpfs[0].wcs.wcs_world2pix(
+            sources.ra, sources.dec, 0.5
+        )
+        sources["col"] += tpfs[0].column
+        sources["row"] += tpfs[0].row
+        self.sources, self.bad_sources = self._clean_source_list(
+            sources, self.ra, self.dec
+        )
 
     def _parse_TPFs_channel(self, tpfs):
         cadences = np.array([tpf.cadenceno for tpf in tpfs])
@@ -212,37 +216,51 @@ class EXBA(object):
 
         return sources, removed_sources
 
-
-    def simple_aperture_phot(self, space='pix-sq'):
-        if space == 'world':
-            aper = (u.arcsecond * 2 * 4).to(u.deg).value # aperture radii in deg
-            aperture_mask = [np.hypot(self.ra - s.ra, self.dec - s.dec) < aper
-                             for _, s in self.sources.iterrows()]
-        elif space == 'pix-cir':
+    def simple_aperture_phot(self, space="pix-sq"):
+        if space == "world":
+            aper = (u.arcsecond * 2 * 4).to(u.deg).value  # aperture radii in deg
+            aperture_mask = [
+                np.hypot(self.ra - s.ra, self.dec - s.dec) < aper
+                for _, s in self.sources.iterrows()
+            ]
+        elif space == "pix-cir":
             aper = 1.7
-            aperture_mask = [np.hypot(self.col - s.col, self.row - s.row) < aper
-                             for _, s in self.sources.iterrows()]
-        elif space == 'pix-sq':
+            aperture_mask = [
+                np.hypot(self.col - s.col, self.row - s.row) < aper
+                for _, s in self.sources.iterrows()
+            ]
+        elif space == "pix-sq":
             aper = [1.5, 1.5]
-            aperture_mask = [(np.abs(self.col - np.floor(s.col)) < aper[1]) &
-                             (np.abs(self.row - np.floor(s.row)) < aper[0])
-                             for _, s in self.sources.iterrows()]
+            aperture_mask = [
+                (np.abs(self.col - np.floor(s.col)) < aper[1])
+                & (np.abs(self.row - np.floor(s.row)) < aper[0])
+                for _, s in self.sources.iterrows()
+            ]
 
         sap = np.zeros((self.sources.shape[0], self.flux.shape[0]))
         sap_e = np.zeros((self.sources.shape[0], self.flux.shape[0]))
 
-        for tdx in tqdm(range(len(self.flux)), desc='Simple SAP flux'):
+        for tdx in tqdm(range(len(self.flux)), desc="Simple SAP flux"):
             sap[:, tdx] = [self.flux[tdx][mask].value.sum() for mask in aperture_mask]
-            sap_e[:, tdx] = [np.power(self.flux_err[tdx][mask].value, 2).sum() ** 0.5
-                             for mask in aperture_mask]
+            sap_e[:, tdx] = [
+                np.power(self.flux_err[tdx][mask].value, 2).sum() ** 0.5
+                for mask in aperture_mask
+            ]
 
-        self.aperture_mask = np.asarray(aperture_mask).reshape(self.sources.shape[0],
-                                                               self.flux_2d.shape[1],
-                                                               self.flux_2d.shape[2])
-        self.sap_lcs = [lk.LightCurve(time=self.time, flux=sap[i], flux_err=sap_e[i],
-                          time_format='bkjd', flux_unit='electron/s',
-                          targetid=self.sources.designation[i]).remove_outliers(sigma=3)
-                         for i in range(len(sap))]
+        self.aperture_mask = np.asarray(aperture_mask).reshape(
+            self.sources.shape[0], self.flux_2d.shape[1], self.flux_2d.shape[2]
+        )
+        self.sap_lcs = [
+            lk.LightCurve(
+                time=self.time,
+                flux=sap[i],
+                flux_err=sap_e[i],
+                time_format="bkjd",
+                flux_unit="electron/s",
+                targetid=self.sources.designation[i],
+            ).remove_outliers(sigma=3)
+            for i in range(len(sap))
+        ]
         return
 
     def plot_image(self, space="pixels", sources=True, **kwargs):
@@ -251,21 +269,18 @@ class EXBA(object):
             y = self.row_2d
             sx = self.sources.col
             sy = self.sources.row
-            xlabel = 'Pixel Column Number'
-            xlabel = 'Pixel Row Number'
+            xlabel = "Pixel Column Number"
+            xlabel = "Pixel Row Number"
         elif space == "wcs":
             x = self.ra_2d
             y = self.dec_2d
             sx = self.sources.ra
             sy = self.sources.dec
-            xlabel = 'R.A.'
-            xlabel = 'Decl.'
+            xlabel = "R.A."
+            xlabel = "Decl."
 
         fig, ax = plt.subplots(1, 1, figsize=(15, 6))
-        fig.suptitle(
-            "EXBA block | Q: %i | Ch: %i"
-            % (self.quarter, self.channel)
-        )
+        fig.suptitle("EXBA block | Q: %i | Ch: %i" % (self.quarter, self.channel))
         pc = ax.pcolormesh(
             x,
             y,
@@ -296,35 +311,51 @@ class EXBA(object):
             if self.aperture_mask[s].sum() == 0:
                 print("Warning: zero pixels in aperture mask.")
                 continue
-            fig, ax = plt.subplots(1, 2, figsize=(15,4),
-                                   gridspec_kw={'width_ratios': [4, 1]})
+            fig, ax = plt.subplots(
+                1, 2, figsize=(15, 4), gridspec_kw={"width_ratios": [4, 1]}
+            )
 
             self.sap_lcs[s].plot(label=self.sap_lcs[s].targetid, ax=ax[0])
 
-            fig.suptitle('EXBA block | Q: %i | Ch: %i' %
-                         (self.quarter, self.channel))
-            pc = ax[1].pcolor(self.flux_2d[0], shading='auto',
-                               norm=colors.SymLogNorm(linthresh=50, vmin=3,
-                                                      vmax=5000, base=10))
-            ax[1].scatter(self.sources.col[s], self.sources.row[s], s=50,
-                          facecolors='none', marker='o', edgecolors='r')
-            ax[1].set_xlabel('Pixels')
-            ax[1].set_ylabel('Pixels')
+            fig.suptitle("EXBA block | Q: %i | Ch: %i" % (self.quarter, self.channel))
+            pc = ax[1].pcolor(
+                self.flux_2d[0],
+                shading="auto",
+                norm=colors.SymLogNorm(linthresh=50, vmin=3, vmax=5000, base=10),
+            )
+            ax[1].scatter(
+                self.sources.col[s],
+                self.sources.row[s],
+                s=50,
+                facecolors="none",
+                marker="o",
+                edgecolors="r",
+            )
+            ax[1].set_xlabel("Pixels")
+            ax[1].set_ylabel("Pixels")
             fig.colorbar(pc, label=r"Flux ($e^{-}s^{-1}$)")
-            ax[1].set_aspect('equal', adjustable='box')
+            ax[1].set_aspect("equal", adjustable="box")
 
             for i in range(self.ra_2d.shape[0]):
                 for j in range(self.ra_2d.shape[1]):
                     if self.aperture_mask[s, i, j]:
                         rect = patches.Rectangle(
-                                        xy=(j, i),
-                                        width=1, height=1, color='red',
-                                        fill=False, hatch='')
+                            xy=(j, i),
+                            width=1,
+                            height=1,
+                            color="red",
+                            fill=False,
+                            hatch="",
+                        )
                         ax[1].add_patch(rect)
             zoom = np.argwhere(self.aperture_mask[s] == True)
-            ax[1].set_ylim(np.maximum(0, zoom[0,0] - 5),
-                           np.minimum(zoom[-1,0] + 5, self.ra_2d.shape[0]))
-            ax[1].set_xlim(np.maximum(0, zoom[0,-1] - 5),
-                           np.minimum(zoom[-1,-1] + 5, self.ra_2d.shape[1]))
+            ax[1].set_ylim(
+                np.maximum(0, zoom[0, 0] - 5),
+                np.minimum(zoom[-1, 0] + 5, self.ra_2d.shape[0]),
+            )
+            ax[1].set_xlim(
+                np.maximum(0, zoom[0, -1] - 5),
+                np.minimum(zoom[-1, -1] + 5, self.ra_2d.shape[1]),
+            )
 
             plt.show()

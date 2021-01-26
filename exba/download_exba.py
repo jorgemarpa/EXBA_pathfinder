@@ -8,28 +8,30 @@ from astropy.io import fits
 
 main_path = os.path.dirname(os.getcwd())
 
-parser = argparse.ArgumentParser(description='AutoEncoder')
-parser.add_argument('--dry-run', dest='dry_run', action='store_true',
-                    default=False,
-                    help='Dry run')
-parser.add_argument('--file-list', dest='file_list', type=str,
-                    help='List of files to be downloaded')
+parser = argparse.ArgumentParser(description="AutoEncoder")
+parser.add_argument(
+    "--dry-run", dest="dry_run", action="store_true", default=False, help="Dry run"
+)
+parser.add_argument(
+    "--file-list", dest="file_list", type=str, help="List of files to be downloaded"
+)
 args = parser.parse_args()
+
 
 def download_exba_files(file_list):
     # creates a temp file
-    if not os.path.isdir('%s/data/temp' % main_path):
-        os.mkdir('%s/data/temp' % main_path)
+    if not os.path.isdir("%s/data/temp" % main_path):
+        os.mkdir("%s/data/temp" % main_path)
 
     urls = np.loadtxt(file_list, dtype=str)
     # check file isnt empty
     print(len(urls))
 
     for i, url in enumerate(urls):
-        print('%i / %i : %s' % (i+1, len(urls), url))
-        fname = url.split('/')[-1]
-        out = '%s/data/temp/%s' % (main_path, fname)
-        out_tree = glob.glob('%s/data/EXBA/*/*/%s' % (main_path, fname))
+        print("%i / %i : %s" % (i + 1, len(urls), url))
+        fname = url.split("/")[-1]
+        out = "%s/data/temp/%s" % (main_path, fname)
+        out_tree = glob.glob("%s/data/EXBA/*/*/%s" % (main_path, fname))
         if os.path.isfile(out) or len(out_tree) != 0:
             continue
         else:
@@ -37,8 +39,9 @@ def download_exba_files(file_list):
 
     return
 
+
 def create_tree_file():
-    fnames = glob.glob('%s/data/temp/*.fits.gz' % main_path)
+    fnames = glob.glob("%s/data/temp/*.fits.gz" % main_path)
 
     # load quarters and channels
     quarters, channels = [], []
@@ -49,18 +52,19 @@ def create_tree_file():
 
     # create directory tree
     for ch in set(channels):
-        if not os.path.isdir('%s/data/EXBA/%s' % (main_path, str(ch))):
-            os.mkdir('%s/data/EXBA/%s' % (main_path, str(ch)))
+        if not os.path.isdir("%s/data/EXBA/%s" % (main_path, str(ch))):
+            os.mkdir("%s/data/EXBA/%s" % (main_path, str(ch)))
         for q in set(quarters):
-            if not os.path.isdir('%s/data/EXBA/%s/%s' % (main_path, str(ch), str(q))):
-                os.mkdir('%s/data/EXBA/%s/%s' % (main_path, str(ch), str(q)))
+            if not os.path.isdir("%s/data/EXBA/%s/%s" % (main_path, str(ch), str(q))):
+                os.mkdir("%s/data/EXBA/%s/%s" % (main_path, str(ch), str(q)))
 
     for f, q, ch in zip(fnames, quarters, channels):
-        name = f.split('/')[-1]
-        out = '%s/data/EXBA/%s/%s/%s' % (main_path, str(ch), str(q), name)
+        name = f.split("/")[-1]
+        out = "%s/data/EXBA/%s/%s/%s" % (main_path, str(ch), str(q), name)
         shutil.move(f, out)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     print("Downloading files from provided list off URLs")
     download_exba_files(args.file_list)
     print("Done!")
