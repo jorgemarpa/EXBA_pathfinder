@@ -2,6 +2,7 @@
 import os, glob
 
 import numpy as np
+import pandas as pd
 import lightkurve as lk
 import matplotlib.pyplot as plt
 from matplotlib import colors
@@ -29,29 +30,24 @@ class EXBA(object):
                 "%s/data/EXBA/%s/%s/*_lpd-targ.fits.gz" % (main_path, channel, quarter)
             )
         )
+        self.tpfs_files = tpfs_paths
 
         tpfs = lk.TargetPixelFileCollection(
             [lk.KeplerTargetPixelFile(f) for f in tpfs_paths[:4]]
         )
-        print(tpfs)
+        self.tpfs = tpfs
         # check for same channels and quarter
         channels = [tpf.get_header()["CHANNEL"] for tpf in tpfs]
         quarters = [tpf.get_header()["QUARTER"] for tpf in tpfs]
-        target_ids = [tpf.get_header()["OBJECT"] for tpf in tpfs]
-        ra_objects = [tpf.get_header()["RA_OBJ"] for tpf in tpfs]
-        dec_objects = [tpf.get_header()["DEC_OBJ"] for tpf in tpfs]
+        # target_ids = [tpf.get_header()["OBJECT"] for tpf in tpfs]
+        # ra_objects = [tpf.get_header()["RA_OBJ"] for tpf in tpfs]
+        # dec_objects = [tpf.get_header()["DEC_OBJ"] for tpf in tpfs]
 
         if len(set(channels)) != 1 and list(set(channels)) != [channel]:
             raise ValueError("All TPFs must be from the same channel %i" % channel)
 
-        if quarter != "all":
-            if list(set(quarters)) != [quarter]:
-                raise ValueError("TPFs are from the wrong quarter")
-        else:
-            if list(set(quarters)) != [5, 9, 13, 17]:
-                raise ValueError(
-                    "Not all quarters are available " + list(set(quarters))
-                )
+        if len(set(quarters)) != 1 and list(set(quarters)) != [quarter]:
+            raise ValueError("All TPFs must be from the same quarter %i" % quarter)
 
         # stich channel's strips and parse TPFs
         self.time, row, col, flux, flux_err, unw = self._parse_TPFs_channel(tpfs)
@@ -88,6 +84,27 @@ class EXBA(object):
             sources, self.ra, self.dec
         )
 
+        self.dx, self.dy, self.gf = np.asarray(
+            [
+                np.vstack(
+                    [
+                        self.col - self.sources["col"][idx],
+                        self.row - self.sources["row"][idx],
+                        np.zeros(len(self.col)) + self.sources.phot_g_mean_flux[idx],
+                    ]
+                )
+                for idx in range(len(self.sources))
+            ]
+        ).transpose([1, 0, 2])
+
+    def __repr__(self):
+        q_result = ",".join([str(k) for k in list([self.quarter])])
+        return "EXBA Patch:\n\t Channel %i, Quarter %s, Gaia sources %i" % (
+            self.channel,
+            q_result,
+            len(self.sources),
+        )
+
     def _parse_TPFs_channel(self, tpfs):
         cadences = np.array([tpf.cadenceno for tpf in tpfs])
         # check if all TPFs has same cadences
@@ -100,7 +117,7 @@ class EXBA(object):
         )
 
         # extract times
-        times = tpfs[0].astropy_time.jd
+        times = tpfs[0].time.jd
 
         # extract row,column mesh grid
         col, row = np.hstack(
@@ -206,8 +223,8 @@ class EXBA(object):
 
         # Keep track of sources that we removed
         sources.loc[:, "clean_flag"] = 0
-        sources.loc[:, "clean_flag"].iloc[~inside] += 2 ** 0  # outside TPF
-        sources.loc[:, "clean_flag"].iloc[unresolved] += 2 ** 1  # close contaminant
+        sources.loc[~inside, "clean_flag"] += 2 ** 0  # outside TPF
+        sources.loc[unresolved, "clean_flag"] += 2 ** 1  # close contaminant
 
         # combine 2 source masks
         clean = sources.clean_flag == 0
@@ -250,17 +267,125 @@ class EXBA(object):
         self.aperture_mask = np.asarray(aperture_mask).reshape(
             self.sources.shape[0], self.flux_2d.shape[1], self.flux_2d.shape[2]
         )
-        self.sap_lcs = [
-            lk.LightCurve(
-                time=self.time,
-                flux=sap[i],
-                flux_err=sap_e[i],
-                time_format="bkjd",
-                flux_unit="electron/s",
-                targetid=self.sources.designation[i],
-            ).remove_outliers(sigma=3)
-            for i in range(len(sap))
-        ]
+        self.sap_lcs = lk.LightCurveCollection(
+            [
+                lk.KeplerLightCurve(
+                    time=self.time,
+                    flux=sap[i],
+                    flux_err=sap_e[i],
+                    time_format="bkjd",
+                    flux_unit="electron/s",
+                    targetid=self.sources.designation[i],
+                    label=self.sources.designation[i],
+                    mission="Kepler",
+                    quarter=self.quarter,
+                ).remove_outliers(sigma=3)
+                for i in range(len(sap))
+            ]
+        )
+        return
+
+    def _find_psf_edge(self, radius_limit=20, cut=300, plot=True):
+
+        mean_flux = np.nanmean(self.flux, axis=0).value
+        r = np.hypot(self.dx, self.dy)
+
+        temp_mask = (r < radius_limit) & (self.gf < 1e7)
+        temp_mask &= temp_mask.sum(axis=0) == 1
+
+        f = np.log10((temp_mask.astype(float) * mean_flux))
+        print(f.shape)
+        weights = (
+            (self.flux_err ** 0.5).sum(axis=0) ** 0.5 / self.flux.shape[0]
+        ) * temp_mask
+        A = np.vstack(
+            [
+                r[temp_mask] ** 0,
+                r[temp_mask],
+                r[temp_mask] ** 2,
+                np.log10(self.gf[temp_mask]),
+                np.log10(self.gf[temp_mask]) ** 2,
+            ]
+        ).T
+        k = np.isfinite(f[temp_mask])
+        for count in [0, 1, 2]:
+            sigma_w_inv = A[k].T.dot(A[k] / weights[temp_mask][k, None] ** 2)
+            B = A[k].T.dot(f[temp_mask][k] / weights[temp_mask][k] ** 2)
+            w = np.linalg.solve(sigma_w_inv, B)
+            res = np.ma.masked_array(f[temp_mask], ~k) - A.dot(w)
+            k &= ~sigma_clip(res, sigma=3).mask
+
+        test_f = np.linspace(
+            np.log10(self.gf.min()),
+            np.log10(self.gf.max()),
+            100,
+        )
+        test_r = np.arange(0, radius_limit, 0.25)
+        test_r2, test_f2 = np.meshgrid(test_r, test_f)
+
+        test_val = (
+            np.vstack(
+                [
+                    test_r2.ravel() ** 0,
+                    test_r2.ravel(),
+                    test_r2.ravel() ** 2,
+                    test_f2.ravel(),
+                    test_f2.ravel() ** 2,
+                ]
+            )
+            .T.dot(w)
+            .reshape(test_r2.shape)
+        )
+
+        # find radius where flux > cut
+        l = np.zeros(len(test_f)) * np.nan
+        for idx in range(len(test_f)):
+            loc = np.where(10 ** test_val[idx] < cut)[0]
+            if len(loc) > 0:
+                l[idx] = test_r[loc[0]]
+        ok = np.isfinite(l)
+        source_radius_limit = np.polyval(
+            np.polyfit(test_f[ok], l[ok], 2), np.log10(self.gf[:, 0])
+        )
+        source_radius_limit[source_radius_limit > radius_limit] = radius_limit
+        self.radius = source_radius_limit
+        self.source_mask = sparse.csr_matrix(
+            self.r.to("arcsec").value < self.radius[:, None]
+        )
+
+        if plot:
+            fig, ax = plt.subplots(1, 2, figsize=(14, 5), facecolor="white")
+
+            ax[0].scatter(
+                r.value[temp_mask][k], f[temp_mask][k], s=0.4, c="k", label="Data"
+            )
+            ax[0].scatter(
+                r.value[temp_mask][k], A[k].dot(w), c="r", s=0.4, label="Model"
+            )
+            ax[0].set(xlabel=("Radius [arcsec]"), ylabel=("log$_{10}$ Flux"))
+            ax[0].legend(frameon=True)
+
+            im = ax[1].pcolormesh(
+                test_f2,
+                test_r2,
+                10 ** test_val,
+                vmin=0,
+                vmax=500,
+                cmap="viridis",
+                shading="auto",
+            )
+            line = np.polyval(np.polyfit(test_f[ok], l[ok], 2), test_f)
+            line[line > radius_limit] = radius_limit
+            ax[1].plot(test_f, line, color="r", label="Mask threshold")
+            ax[1].legend(frameon=True)
+            cbar = plt.colorbar(im, ax=ax)
+            cbar.set_label("Contained PSF Flux [counts]")
+
+            ax[1].set(
+                ylabel=("Radius from Source [arcsecond]"),
+                xlabel=("log$_{10}$ Source Flux"),
+            )
+            plt.show()
         return
 
     def plot_image(self, space="pixels", sources=True, **kwargs):
@@ -305,17 +430,29 @@ class EXBA(object):
 
         return ax
 
-    def plot_lightcurves(self):
+    def plot_lightcurves(self, object_id=None):
 
-        for s in range(0, len(self.sources), 5):
-            if self.aperture_mask[s].sum() == 0:
+        if object_id is None:
+            lcs = self.sap_lcs
+            sources = self.sources
+            aperture_mask = self.aperture_mask
+            step = 10
+        else:
+            idx = np.in1d(self.sources.designation, np.array(object_id))
+            sources = self.sources[idx]
+            lcs = self.sap_lcs[idx]
+            aperture_mask = self.aperture_mask[idx]
+            step = 1
+
+        for s in range(0, len(sources), step):
+            if aperture_mask[s].sum() == 0:
                 print("Warning: zero pixels in aperture mask.")
                 continue
             fig, ax = plt.subplots(
                 1, 2, figsize=(15, 4), gridspec_kw={"width_ratios": [4, 1]}
             )
 
-            self.sap_lcs[s].plot(label=self.sap_lcs[s].targetid, ax=ax[0])
+            lcs[s].plot(label=lcs[s].targetid, ax=ax[0])
 
             fig.suptitle("EXBA block | Q: %i | Ch: %i" % (self.quarter, self.channel))
             pc = ax[1].pcolor(
@@ -324,10 +461,10 @@ class EXBA(object):
                 norm=colors.SymLogNorm(linthresh=50, vmin=3, vmax=5000, base=10),
             )
             ax[1].scatter(
-                self.sources.col[s],
-                self.sources.row[s],
-                s=50,
-                facecolors="none",
+                sources.col.iloc[s] - self.col.min(),
+                sources.row.iloc[s] - self.row.min(),
+                s=25,
+                facecolors="r",
                 marker="o",
                 edgecolors="r",
             )
@@ -338,7 +475,7 @@ class EXBA(object):
 
             for i in range(self.ra_2d.shape[0]):
                 for j in range(self.ra_2d.shape[1]):
-                    if self.aperture_mask[s, i, j]:
+                    if aperture_mask[s, i, j]:
                         rect = patches.Rectangle(
                             xy=(j, i),
                             width=1,
@@ -348,7 +485,7 @@ class EXBA(object):
                             hatch="",
                         )
                         ax[1].add_patch(rect)
-            zoom = np.argwhere(self.aperture_mask[s] == True)
+            zoom = np.argwhere(aperture_mask[s] == True)
             ax[1].set_ylim(
                 np.maximum(0, zoom[0, 0] - 5),
                 np.minimum(zoom[-1, 0] + 5, self.ra_2d.shape[0]),
@@ -359,3 +496,48 @@ class EXBA(object):
             )
 
             plt.show()
+
+
+class EXBACollection(EXBA):
+    def __init__(self, EXBAs):
+
+        # check if each element of exba_quarters are EXBA objects
+        if not all([isinstance(exba, EXBA) for exba in EXBAs]):
+            raise AssertionError("All elements of the list must be EXBA objects")
+
+        self.channel = EXBAs[0].channel
+        self.quarter = [exba.quarter for exba in EXBAs]
+
+        # check that gaia sources are in all quarters
+        gids = [exba.sources.designation.tolist() for exba in EXBAs]
+        unique_gids = list(set([item for sublist in gids for item in sublist]))
+
+        # create matris with index position to link sources across quarters
+        # this asume that sources aren't in the same position in the DF, sources
+        # can disapear (fall out the ccd), not all sources show up in all quarters.
+        pm = np.empty((len(unique_gids), len(EXBAs)), dtype=np.int) * np.nan
+        for q in range(len(EXBAs)):
+            mask1 = np.in1d(EXBAs[q].sources.designation.values, unique_gids)
+            mask2 = np.in1d(unique_gids, EXBAs[q].sources.designation.values)
+            pm[mask2, q] = np.arange(len(EXBAs[q].sources.designation.values))[mask1]
+
+        # rearange sources as list of lk Collection containing all quarters per source
+        sources = []
+        for i, gid in enumerate(unique_gids):
+            aux = lk.LightCurveCollection(
+                [
+                    EXBAs[q].sap_lcs[int(pos)]
+                    for q, pos in enumerate(pm[i])
+                    if np.isfinite(pos)
+                ]
+            )
+            sources.append(lk.LightCurveCollection(aux))
+        self.sources = sources
+
+    def stitch_quarters():
+
+        return
+
+    def apply_CBV():
+
+        return

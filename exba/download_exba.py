@@ -10,7 +10,11 @@ main_path = os.path.dirname(os.getcwd())
 
 parser = argparse.ArgumentParser(description="AutoEncoder")
 parser.add_argument(
-    "--dry-run", dest="dry_run", action="store_true", default=False, help="Dry run"
+    "--do-tree",
+    dest="do_tree",
+    action="store_true",
+    default=False,
+    help="Skip download and only do the directory tree.",
 )
 parser.add_argument(
     "--file-list", dest="file_list", type=str, help="List of files to be downloaded"
@@ -28,7 +32,7 @@ def download_exba_files(file_list):
     print(len(urls))
 
     for i, url in enumerate(urls):
-        print("%i / %i : %s" % (i + 1, len(urls), url))
+        print("\n%i / %i : %s" % (i + 1, len(urls), url))
         fname = url.split("/")[-1]
         out = "%s/data/temp/%s" % (main_path, fname)
         out_tree = glob.glob("%s/data/EXBA/*/*/%s" % (main_path, fname))
@@ -65,9 +69,10 @@ def create_tree_file():
 
 
 if __name__ == "__main__":
-    print("Downloading files from provided list off URLs")
-    download_exba_files(args.file_list)
-    print("Done!")
+    if not args.do_tree:
+        print("Downloading files from provided list off URLs")
+        download_exba_files(args.file_list)
+        print("Done!")
 
     print("Creating tree directory")
     create_tree_file()
