@@ -9,6 +9,7 @@ import pyia
 
 import astropy.units as u
 from astropy.time import Time
+from astropy.timeseries import BoxLeastSquares
 
 
 @functools.lru_cache()
@@ -164,3 +165,32 @@ def wrapped_spline(input_vector, order=2, nknots=10):
     for idx in np.arange(-order, 0):
         folded_basis[idx, :] += np.copy(basis)[nt // 2 + idx, len(x) :]
     return folded_basis
+
+
+def _bootstrap_max(t, y, dy, pmin, pmax, ffac, random_seed, n_bootstrap=1000):
+    """Generate a sequence of bootstrap estimates of the max"""
+
+    rng = np.random.RandomState(random_seed)
+    power_max = []
+    for _ in range(n_bootstrap):
+        s = rng.randint(0, len(y), len(y))  # sample with replacement
+        bls_boot = BoxLeastSquares(t, y[s], dy[s])
+        result = bls_boot.autopower(
+            [0.05, 0.10, 0.15, 0.20, 0.25, 0.33],
+            minimum_period=pmin,
+            maximum_period=pmax,
+            frequency_factor=ffac,
+        )
+        power_max.append(result.power.max())
+
+    power_max = u.Quantity(power_max)
+    power_max.sort()
+
+    return power_max
+
+
+def fap_bootstrap(Z, pmin, pmax, ffac, t, y, dy, n_bootstraps=1000, random_seed=None):
+    """Bootstrap estimate of the false alarm probability"""
+    pmax = _bootstrap_max(t, y, dy, pmin, pmax, ffac, random_seed, n_bootstraps)
+
+    return 1 - np.searchsorted(pmax, Z) / len(pmax)

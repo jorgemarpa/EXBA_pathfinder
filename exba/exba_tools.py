@@ -1,9 +1,12 @@
 """Tools to stitch EXBA images and extract LC of detected Gaia sources"""
 import os, glob
+import warnings
 
 import numpy as np
 import pandas as pd
+import _pickle as cPickle
 import lightkurve as lk
+from lightkurve.correctors import CBVCorrector
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from matplotlib import patches
@@ -13,7 +16,7 @@ from astropy.time import Time
 from astropy.coordinates import SkyCoord, match_coordinates_3d
 from astropy.stats import sigma_clip
 
-from .utils import get_gaia_sources
+from .utils import get_gaia_sources, fap_bootstrap
 
 main_path = os.path.dirname(os.getcwd())
 
@@ -27,7 +30,8 @@ class EXBA(object):
         # load local TPFs files
         tpfs_paths = np.sort(
             glob.glob(
-                "%s/data/EXBA/%s/%s/*_lpd-targ.fits.gz" % (main_path, channel, quarter)
+                "%s/data/EXBA/%s/%s/*_lpd-targ.fits.gz"
+                % (main_path, str(channel), str(quarter))
             )
         )
         self.tpfs_files = tpfs_paths
@@ -44,13 +48,27 @@ class EXBA(object):
         # dec_objects = [tpf.get_header()["DEC_OBJ"] for tpf in tpfs]
 
         if len(set(channels)) != 1 and list(set(channels)) != [channel]:
-            raise ValueError("All TPFs must be from the same channel %i" % channel)
+            raise ValueError(
+                "All TPFs must be from the same channel %s"
+                % ",".join([str(k) for k in channels])
+            )
 
         if len(set(quarters)) != 1 and list(set(quarters)) != [quarter]:
-            raise ValueError("All TPFs must be from the same quarter %i" % quarter)
+            raise ValueError(
+                "All TPFs must be from the same quarter %s"
+                % ",".join([str(k) for k in quarters])
+            )
 
         # stich channel's strips and parse TPFs
-        self.time, row, col, flux, flux_err, unw = self._parse_TPFs_channel(tpfs)
+        (
+            self.time,
+            self.cadences,
+            row,
+            col,
+            flux,
+            flux_err,
+            unw,
+        ) = self._parse_TPFs_channel(tpfs)
         self.row_2d, self.col_2d, self.flux_2d, self.flux_err_2d, self.unw_2d = (
             row.copy(),
             col.copy(),
@@ -143,7 +161,7 @@ class EXBA(object):
             [np.ones(tpf.shape[1:], dtype=np.int) * i for i, tpf in enumerate(tpfs)]
         )
 
-        return times, row.T, col.T, flux, flux_err, unw
+        return times, cadences[0], row.T, col.T, flux, flux_err, unw
 
     def _convert_to_wcs(self, tpfs, row, col):
         ra, dec = tpfs[0].wcs.wcs_pix2world(
@@ -264,13 +282,24 @@ class EXBA(object):
                 for mask in aperture_mask
             ]
 
-        self.aperture_mask = np.asarray(aperture_mask).reshape(
+        # check for light curves with zero flux
+        zero_mask = np.all((sap == 0), axis=1)
+        sap = sap[~zero_mask]
+        sap_e = sap_e[~zero_mask]
+        aperture_mask = np.asarray(aperture_mask)[~zero_mask]
+        self.bad_sources = pd.concat(
+            [self.bad_sources, self.sources[zero_mask]]
+        ).reset_index(drop=True)
+        self.sources = self.sources[~zero_mask].reset_index(drop=True)
+
+        self.aperture_mask = aperture_mask.reshape(
             self.sources.shape[0], self.flux_2d.shape[1], self.flux_2d.shape[2]
         )
         self.sap_lcs = lk.LightCurveCollection(
             [
                 lk.KeplerLightCurve(
                     time=self.time,
+                    cadenceno=self.cadences,
                     flux=sap[i],
                     flux_err=sap_e[i],
                     time_format="bkjd",
@@ -279,7 +308,10 @@ class EXBA(object):
                     label=self.sources.designation[i],
                     mission="Kepler",
                     quarter=self.quarter,
-                ).remove_outliers(sigma=3)
+                    channel=self.channel,
+                    ra=self.sources.ra[i],
+                    dec=self.sources.dec[i],
+                ).remove_outliers(sigma=5)
                 for i in range(len(sap))
             ]
         )
@@ -388,6 +420,130 @@ class EXBA(object):
             plt.show()
         return
 
+    def apply_CBV(self, do_under=False, ignore_warnings=True):
+        if ignore_warnings:
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+        # Select which CBVs to use in the correction
+        cbv_type = ["SingleScale"]
+        # Select which CBV indices to use
+        # Use the first 8 SingleScale and all Spike CBVS
+        cbv_indices = [np.arange(1, 9)]
+
+        over_fit_m = []
+        under_fit_m = []
+        corrected_lcs = []
+
+        for lc in tqdm(self.sap_lcs, desc="Applying CBVs to LCs"):
+            lc = lc[lc.flux_err > 0]
+            cbvcor = CBVCorrector(lc)
+            cbvcor.correct_gaussian_prior(
+                cbv_type=cbv_type, cbv_indices=cbv_indices, alpha=1e-4
+            )
+            over_fit_m.append(cbvcor.over_fitting_metric())
+            if do_under:
+                under_fit_m.append(cbvcor.under_fitting_metric())
+            corrected_lcs.append(cbvcor.corrected_lc)
+
+        self.corrected_lcs = lk.LightCurveCollection(corrected_lcs)
+        self.over_fitting_metrics = np.array(over_fit_m)
+        if do_under:
+            self.under_fitting_metrics = np.array(under_fit_m)
+        return
+
+    def store_data(self):
+        out_path = os.path.dirname(self.tpfs_files[0])
+        self.sources.to_csv("%s/gaia_dr2_xmatch.csv" % (out_path))
+        lc_out_name = "sap_lcs"
+        if hasattr(self, "corrected_lcs"):
+            lc_to_save = self.corrected_lcs
+            lc_out_name += "_CBVcorrected"
+        else:
+            lc_to_save = self.sap_lcs
+        with open("%s/%s.pkl" % (out_path, lc_out_name), "wb") as f:
+            cPickle.dump(lc_to_save, f)
+        return
+
+    def check_for_rolling_band(self):
+        """
+        method to check if the exba patch suffers from rolling time-variable background
+        noise, aka rolling band
+        """
+        # create a background mask, use self.aperture_mask.sum(axis=0) == 0
+
+        # compute background light curves
+
+        # inspect for low-freq variability, if so, then create model lc for bkg
+
+        return
+
+    def do_bls_search(self, plot=False, test_lcs=None):
+
+        if not hasattr(self, "corrected_lcs"):
+            raise AttributeError(
+                "No CBV corrected light curves computed, run apply_CBV first"
+            )
+        if test_lcs:
+            search_here = list(test_lcs) if len(test_lcs) == 1 else test_lcs
+        else:
+            search_here = self.corrected_lcs
+
+        search_period = np.arange(0, 25, 0.2)[1:]
+        period_best, period_fap = [], []
+        pmin, pmax, ffac = 0.5, 20, 10
+
+        for lc in tqdm(search_here, desc="BLS search"):
+            lc = lc.remove_outliers(sigma_lower=20, sigma_upper=5)
+            periodogram = lc.to_periodogram(
+                method="bls",
+                minimum_period=pmin,
+                maximum_period=pmax,
+                frequency_factor=ffac,
+            )
+            best_fit_period = periodogram.period_at_max_power
+            p_fap = fap_bootstrap(
+                periodogram.power.max(),
+                pmin,
+                pmax,
+                ffac,
+                lc.time,
+                lc.flux,
+                lc.flux_err,
+                n_bootstraps=100,
+                random_seed=99,
+            )
+            period_best.append(best_fit_period)
+            period_fap.append(p_fap)
+
+            if plot:
+                fig = plt.figure(figsize=(13, 9))
+
+                plt.subplots_adjust(wspace=0.25, hspace=0.25)
+
+                sub1 = fig.add_subplot(2, 2, 1)
+                sub1.axvline(
+                    best_fit_period.value,
+                    color="r",
+                    linestyle="--",
+                    label="Period : %.3f d\nfap : %.3f"
+                    % (best_fit_period.value, p_fap),
+                )
+                periodogram.plot(ax=sub1)
+                sub1.legend()
+
+                sub2 = fig.add_subplot(2, 2, 2)
+                lc.fold(
+                    period=best_fit_period,
+                    epoch_time=periodogram.transit_time_at_max_power,
+                ).errorbar(ax=sub2, alpha=0.8)
+
+                sub3 = fig.add_subplot(2, 2, (3, 4))
+                lc.plot(ax=sub3)
+                periodogram.get_transit_model().plot(ax=sub3, color="r")
+                plt.show()
+
+        return u.Quantity(period_best), u.Quantity(period_fap)
+
     def plot_image(self, space="pixels", sources=True, **kwargs):
         if space == "pixels":
             x = self.col_2d
@@ -430,31 +586,39 @@ class EXBA(object):
 
         return ax
 
-    def plot_lightcurves(self, object_id=None):
+    def plot_lightcurves(self, object_id=None, step=10):
 
         if object_id is None:
-            lcs = self.sap_lcs
+            lcs = self.corrected_lcs if hasattr(self, "corrected_lcs") else self.sap_lcs
             sources = self.sources
             aperture_mask = self.aperture_mask
-            step = 10
+            step = step
         else:
             idx = np.in1d(self.sources.designation, np.array(object_id))
             sources = self.sources[idx]
-            lcs = self.sap_lcs[idx]
+            lcs = (
+                self.corrected_lcs[idx]
+                if hasattr(self, "corrected_lcs")
+                else self.sap_lcs[idx]
+            )
             aperture_mask = self.aperture_mask[idx]
             step = 1
 
         for s in range(0, len(sources), step):
             if aperture_mask[s].sum() == 0:
                 print("Warning: zero pixels in aperture mask.")
-                continue
+                # continue
+
             fig, ax = plt.subplots(
                 1, 2, figsize=(15, 4), gridspec_kw={"width_ratios": [4, 1]}
             )
 
             lcs[s].plot(label=lcs[s].targetid, ax=ax[0])
 
-            fig.suptitle("EXBA block | Q: %i | Ch: %i" % (self.quarter, self.channel))
+            fig.suptitle(
+                "EXBA block | Q: %i | Ch: %i | Source %i"
+                % (self.quarter, self.channel, s)
+            )
             pc = ax[1].pcolor(
                 self.flux_2d[0],
                 shading="auto",
@@ -502,15 +666,15 @@ class EXBACollection(EXBA):
     def __init__(self, EXBAs):
 
         # check if each element of exba_quarters are EXBA objects
-        if not all([isinstance(exba, EXBA) for exba in EXBAs]):
-            raise AssertionError("All elements of the list must be EXBA objects")
+        # if not all([isinstance(exba, EXBA) for exba in EXBAs]):
+        #     raise AssertionError("All elements of the list must be EXBA objects")
 
         self.channel = EXBAs[0].channel
         self.quarter = [exba.quarter for exba in EXBAs]
 
         # check that gaia sources are in all quarters
         gids = [exba.sources.designation.tolist() for exba in EXBAs]
-        unique_gids = list(set([item for sublist in gids for item in sublist]))
+        unique_gids = np.unique([item for sublist in gids for item in sublist])
 
         # create matris with index position to link sources across quarters
         # this asume that sources aren't in the same position in the DF, sources
@@ -532,12 +696,64 @@ class EXBACollection(EXBA):
                 ]
             )
             sources.append(lk.LightCurveCollection(aux))
-        self.sources = sources
+        self.source_lcs = sources
 
-    def stitch_quarters():
+    def __repr__(self):
+        q_result = ",".join([str(k) for k in list([self.quarter])])
+        return "EXBA Patch:\n\t Channel %i, Quarter %s, Gaia sources %i" % (
+            self.channel,
+            q_result,
+            len(self.source_lcs),
+        )
+
+    def stitch_quarters(self):
+
+        # lk.LightCurveCollection.stitch() normalize by default all lcs before stitching
+        if hasattr(self, "source_lcs"):
+            self.stitched_lcs = lk.LightCurveCollection(
+                [lc.stitch() for lc in self.source_lcs]
+            )
+        if hasattr(self, "corrected_lcs"):
+            self.stitched_corrected_lcs = lk.LightCurveCollection(
+                [lc.stitch() for lc in self.corrected_lcs]
+            )
 
         return
 
-    def apply_CBV():
+    def apply_CBV(self, ignore_warnings=True, do_under=False):
 
+        if ignore_warnings:
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+        # Select which CBVs to use in the correction
+        cbv_type = ["SingleScale"]
+        # Select which CBV indices to use
+        # Use the first 8 SingleScale and all Spike CBVS
+        cbv_indices = [np.arange(1, 9)]
+
+        over_fit_m = []
+        under_fit_m = []
+        corrected_lcs = []
+
+        for source_lc in tqdm(self.source_lcs, desc="Gaia sources"):
+            tmp, tmp_over, tmp_under = [], [], []
+            for i, lc in enumerate(source_lc):
+                lc = lc[lc.flux_err > 0]
+                cbvcor = CBVCorrector(lc)
+                cbvcor.correct_gaussian_prior(
+                    cbv_type=cbv_type, cbv_indices=cbv_indices, alpha=1e-4
+                )
+                tmp_over.append(cbvcor.over_fitting_metric())
+                if do_under:
+                    tmp_under.append(cbvcor.under_fitting_metric())
+                tmp.append(cbvcor.corrected_lc)
+            tmp = lk.LightCurveCollection(tmp)
+            corrected_lcs.append(tmp)
+            over_fit_m.append(np.array(tmp_over))
+            if do_under:
+                under_fit_m.append(np.array(tmp_under))
+        self.corrected_lcs = corrected_lcs
+        self.over_fitting_metrics = np.asarray(over_fit_m, dtype=object)
+        if do_under:
+            self.under_fitting_metrics = np.asarray(under_fit_m, dtype=object)
         return
