@@ -22,7 +22,7 @@ main_path = os.path.dirname(os.getcwd())
 
 
 class EXBA(object):
-    def __init__(self, channel=53, quarter=5, path=main_path):
+    def __init__(self, channel=53, quarter=5, magnitude_limit=25, path=main_path):
 
         self.quarter = quarter
         self.channel = channel
@@ -251,7 +251,7 @@ class EXBA(object):
 
         return sources, removed_sources
 
-    def simple_aperture_phot(self, space="pix-sq"):
+    def simple_aperture_phot(self, space="pix-sq", plot=True):
         if space == "world":
             aper = (u.arcsecond * 2 * 4).to(u.deg).value  # aperture radii in deg
             aperture_mask = [
@@ -283,19 +283,63 @@ class EXBA(object):
             ]
             # create a background mask
             sq_ap = [
-                (np.abs(self.col - np.floor(s.col)) < 6)
-                & (np.abs(self.row - np.floor(s.row)) < 6)
+                (np.abs(self.col - np.floor(s.col)) < 5)
+                & (np.abs(self.row - np.floor(s.row)) < 5)
                 for _, s in self.sources.iterrows()
             ]
-            bkg_mask = np.asarray(sq_ap).sum(axis=0) == 0
+            bkg_mask = np.asarray(aperture_mask).sum(axis=0) == 0
             self.bkg_mask = bkg_mask.reshape(self.col_2d.shape)
             # compute a SNR image
             mean_flux = self.flux.value.mean(axis=0)
-            bkg_std = mean_flux[bkg_mask].std()
+            bkg_std = sigma_clip(
+                mean_flux[bkg_mask],
+                sigma=3,
+                maxiters=3,
+                cenfunc=np.median,
+                masked=False,
+                copy=False,
+            ).std()
             snr_img = np.abs(mean_flux / bkg_std)
             self.snr_img = snr_img.reshape(self.col_2d.shape)
             # combine circular aperture with SNR > 5 mask
-            aperture_mask &= snr_img > 3
+            aperture_mask &= snr_img > 5
+
+            if plot:
+                fig, ax = plt.subplots(figsize=(9, 7))
+                ax.set_title(
+                    "Background Mask mean = %.3f std = %.3f"
+                    % (mean_flux[bkg_mask].mean(), bkg_std)
+                )
+                pc = ax.pcolor(
+                    self.flux_2d[0],
+                    shading="auto",
+                    norm=colors.SymLogNorm(linthresh=50, vmin=3, vmax=5000, base=10),
+                )
+                ax.set_aspect("equal", adjustable="box")
+                ax.scatter(
+                    self.sources.col - self.col.min() + 0.5,
+                    self.sources.row - self.row.min() + 0.5,
+                    s=25,
+                    facecolors="c",
+                    marker="o",
+                    edgecolors="r",
+                )
+
+                for i in range(self.ra_2d.shape[0]):
+                    for j in range(self.ra_2d.shape[1]):
+                        if self.bkg_mask[i, j]:
+                            rect = patches.Rectangle(
+                                xy=(j, i),
+                                width=1,
+                                height=1,
+                                color="red",
+                                fill=False,
+                                hatch="",
+                                alpha=0.2,
+                            )
+                            ax.add_patch(rect)
+
+                plt.show()
 
         aperture_mask = np.asarray(aperture_mask)
         sap = np.zeros((self.sources.shape[0], self.flux.shape[0]))
@@ -348,7 +392,7 @@ class EXBA(object):
         mean_flux = np.nanmean(self.flux, axis=0).value
         r = np.hypot(self.dx, self.dy)
 
-        temp_mask = (r < radius_limit) & (self.gf < 1e6) & (self.gf > 1e4)
+        temp_mask = (r < radius_limit) & (self.gf < 1e7) & (self.gf > 1e4)
         temp_mask &= temp_mask.sum(axis=0) == 1
 
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -601,8 +645,8 @@ class EXBA(object):
                 norm=colors.SymLogNorm(linthresh=50, vmin=3, vmax=5000, base=10),
             )
             ax[1].scatter(
-                sources.col.iloc[s] - self.col.min(),
-                sources.row.iloc[s] - self.row.min(),
+                sources.col.iloc[s] - self.col.min() + 0.5,
+                sources.row.iloc[s] - self.row.min() + 0.5,
                 s=25,
                 facecolors="r",
                 marker="o",
