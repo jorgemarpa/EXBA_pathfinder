@@ -5,7 +5,9 @@ import functools
 
 from scipy import sparse
 from patsy import dmatrix
+from tqdm.notebook import tqdm
 import pyia
+import matplotlib.pyplot as plt
 
 import astropy.units as u
 from astropy.time import Time
@@ -194,3 +196,67 @@ def fap_bootstrap(Z, pmin, pmax, ffac, t, y, dy, n_bootstraps=1000, random_seed=
     pmax = _bootstrap_max(t, y, dy, pmin, pmax, ffac, random_seed, n_bootstraps)
 
     return 1 - np.searchsorted(pmax, Z) / len(pmax)
+
+
+def get_bls_periods(lcs, plot=False, n_boots=100):
+
+    search_period = np.arange(0, 25, 0.2)[1:]
+    period_best, period_fap, snr = [], [], []
+    pmin, pmax, ffac = 0.5, 20, 10
+
+    for lc in tqdm(lcs, desc="BLS search"):
+        lc = lc.remove_outliers(sigma_lower=20, sigma_upper=5)
+        periodogram = lc.to_periodogram(
+            method="bls",
+            minimum_period=pmin,
+            maximum_period=pmax,
+            frequency_factor=ffac,
+        )
+        best_fit_period = periodogram.period_at_max_power
+        power_snr = periodogram.snr[np.argmax(periodogram.power)]
+        period_best.append(best_fit_period)
+        snr.append(power_snr)
+        if n_boots > 0:
+            p_fap = fap_bootstrap(
+                periodogram.power.max(),
+                pmin,
+                pmax,
+                ffac,
+                lc.time,
+                lc.flux,
+                lc.flux_err,
+                n_bootstraps=n_boots,
+                random_seed=99,
+            )
+        else:
+            p_fap = np.nan
+        period_fap.append(np.nan)
+
+        if plot:
+            fig = plt.figure(figsize=(13, 9))
+
+            plt.subplots_adjust(wspace=0.25, hspace=0.25)
+
+            sub1 = fig.add_subplot(2, 2, 1)
+            sub1.axvline(
+                best_fit_period.value,
+                color="r",
+                linestyle="--",
+                label="Period : %.3f d \nsnr %.4f\nfap : %.3f"
+                % (best_fit_period.value, power_snr, p_fap),
+            )
+            periodogram.plot(ax=sub1)
+            sub1.legend()
+
+            sub2 = fig.add_subplot(2, 2, 2)
+            lc.fold(
+                period=best_fit_period,
+                epoch_time=periodogram.transit_time_at_max_power,
+            ).errorbar(ax=sub2, alpha=0.8)
+
+            sub3 = fig.add_subplot(2, 2, (3, 4))
+            lc.plot(ax=sub3)
+            periodogram.get_transit_model().plot(ax=sub3, color="r")
+            plt.show()
+
+    return u.Quantity(period_best), np.array(period_fap), np.array(snr)
