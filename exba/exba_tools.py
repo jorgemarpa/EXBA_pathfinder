@@ -4,9 +4,11 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import seaborn as sb
 import _pickle as cPickle
 import lightkurve as lk
 from lightkurve.correctors import CBVCorrector
+from scipy import sparse
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from matplotlib import patches
@@ -16,7 +18,13 @@ from astropy.time import Time
 from astropy.coordinates import SkyCoord, match_coordinates_3d
 from astropy.stats import sigma_clip
 
-from .utils import get_gaia_sources, get_bls_periods
+from .utils import (
+    get_gaia_sources,
+    get_bls_periods,
+    clean_aperture_mask,
+    make_A,
+    solve_linear_model,
+)
 
 main_path = os.path.dirname(os.getcwd())
 
@@ -37,7 +45,7 @@ class EXBA(object):
         self.tpfs_files = tpfs_paths
 
         tpfs = lk.TargetPixelFileCollection(
-            [lk.KeplerTargetPixelFile(f) for f in tpfs_paths[:4]]
+            [lk.KeplerTargetPixelFile(f) for f in tpfs_paths]
         )
         self.tpfs = tpfs
         # check for same channels and quarter
@@ -60,15 +68,10 @@ class EXBA(object):
             )
 
         # stich channel's strips and parse TPFs
-        (
-            self.time,
-            self.cadences,
-            row,
-            col,
-            flux,
-            flux_err,
-            unw,
-        ) = self._parse_TPFs_channel(tpfs)
+        time, cadences, row, col, flux, flux_err, unw = self._parse_TPFs_channel(tpfs)
+        self.time, self.cadences, flux, flux_err = self._preprocess(
+            time, cadences, flux, flux_err
+        )
         self.row_2d, self.col_2d, self.flux_2d, self.flux_err_2d, self.unw_2d = (
             row.copy(),
             col.copy(),
@@ -123,6 +126,13 @@ class EXBA(object):
             len(self.sources),
         )
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state["tpfs"]
+        return state
+
+    # def __setstate__(self, state):
+
     def _parse_TPFs_channel(self, tpfs):
         cadences = np.array([tpf.cadenceno for tpf in tpfs])
         # check if all TPFs has same cadences
@@ -162,6 +172,19 @@ class EXBA(object):
         )
 
         return times, cadences[0], row.T, col.T, flux, flux_err, unw
+
+    def _preprocess(self, times, cadences, flux, flux_err):
+        """
+        Clean pixels with nan values and bad cadences.
+        """
+        # Remove cadences with nan flux
+        nan_cadences = np.array([np.isnan(im).sum() == 0 for im in flux])
+        times = times[nan_cadences]
+        cadences = cadences[nan_cadences]
+        flux = flux[nan_cadences]
+        flux_err = flux_err[nan_cadences]
+
+        return times, cadences, flux, flux_err
 
     def _convert_to_wcs(self, tpfs, row, col):
         ra, dec = tpfs[0].wcs.wcs_pix2world(
@@ -209,6 +232,7 @@ class EXBA(object):
             tuple(rads),
             magnitude_limit=magnitude_limit,
             epoch=Time(epoch, format="jd").jyear,
+            gaia="dr2",
         )
         return sources
 
@@ -251,6 +275,126 @@ class EXBA(object):
 
         return sources, removed_sources
 
+    def _find_psf_edge(self, radius_limit=6, cut=300, plot=True, load=False):
+
+        mean_flux = np.nanmean(self.flux, axis=0).value
+        mean_flux_err = np.nanmean(self.flux_err, axis=0).value
+        r = np.hypot(self.dx, self.dy)
+
+        temp_mask = (r < radius_limit) & (self.gf < 1e7) & (self.gf > 1e4)
+        temp_mask &= temp_mask.sum(axis=0) == 1
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            f = np.log10((temp_mask.astype(float) * mean_flux))
+
+        if load:
+            input = "%s/data/EXBA/%s/%s/psf_edge_model.pkl" % (
+                main_path,
+                str(self.channel),
+                str(self.quarter),
+            )
+            aux = cPickle.load(open(input, "rb"))
+            A = aux["A"]
+            B = aux["B"]
+            w = aux["w"]
+            k = np.isfinite(f[temp_mask])
+
+        else:
+            weights = (
+                (mean_flux_err ** 0.5).sum(axis=0) ** 0.5 / self.flux.shape[0]
+            ) * temp_mask
+            A = np.vstack(
+                [
+                    r[temp_mask] ** 0,
+                    r[temp_mask],
+                    r[temp_mask] ** 2,
+                    np.log10(self.gf[temp_mask]),
+                    # np.log10(self.gf[temp_mask]) ** 2,
+                ]
+            ).T
+            k = np.isfinite(f[temp_mask])
+            for count in [0, 1, 2]:
+                sigma_w_inv = A[k].T.dot(A[k] / weights[temp_mask][k, None] ** 2)
+                B = A[k].T.dot(f[temp_mask][k] / weights[temp_mask][k] ** 2)
+                w = np.linalg.solve(sigma_w_inv, B)
+                res = np.ma.masked_array(f[temp_mask], ~k) - A.dot(w)
+                k &= ~sigma_clip(res, sigma=3).mask
+
+            if True:
+                to_save = dict(A=A, B=B, w=w, k=k)
+                output = "%s/data/EXBA/%s/%s/psf_edge_model.pkl" % (
+                    main_path,
+                    str(self.channel),
+                    str(self.quarter),
+                )
+                with open(output, "wb") as file:
+                    cPickle.dump(to_save, file)
+
+        test_f = np.linspace(
+            np.log10(self.gf.min()),
+            np.log10(self.gf.max()),
+            100,
+        )
+        test_r = np.arange(0, radius_limit, 0.25)
+        test_r2, test_f2 = np.meshgrid(test_r, test_f)
+
+        test_val = (
+            np.vstack(
+                [
+                    test_r2.ravel() ** 0,
+                    test_r2.ravel(),
+                    test_r2.ravel() ** 2,
+                    test_f2.ravel(),
+                    # test_f2.ravel() ** 2,
+                ]
+            )
+            .T.dot(w)
+            .reshape(test_r2.shape)
+        )
+
+        # find radius where flux > cut
+        l = np.zeros(len(test_f)) * np.nan
+        for idx in range(len(test_f)):
+            loc = np.where(10 ** test_val[idx] < cut)[0]
+            if len(loc) > 0:
+                l[idx] = test_r[loc[0]]
+        ok = np.isfinite(l)
+        source_radius_limit = np.polyval(
+            np.polyfit(test_f[ok], l[ok], 2), np.log10(self.gf[:, 0])
+        )
+        source_radius_limit[source_radius_limit > radius_limit] = radius_limit
+
+        if plot:
+            fig, ax = plt.subplots(1, 2, figsize=(14, 5), facecolor="white")
+
+            ax[0].scatter(r[temp_mask][k], f[temp_mask][k], s=0.4, c="k", label="Data")
+            ax[0].scatter(r[temp_mask][k], A[k].dot(w), c="r", s=0.4, label="Model")
+            ax[0].set(xlabel=("Radius [pix]"), ylabel=("log$_{10}$ Flux"))
+            ax[0].legend(frameon=True)
+
+            im = ax[1].pcolormesh(
+                test_f2,
+                test_r2,
+                10 ** test_val,
+                vmin=0,
+                vmax=500,
+                cmap="viridis",
+                shading="auto",
+            )
+            line = np.polyval(np.polyfit(test_f[ok], l[ok], 2), test_f)
+            line[line > radius_limit] = radius_limit
+            ax[1].plot(test_f, line, color="r", label="Mask threshold")
+            ax[1].legend(frameon=True)
+            cbar = plt.colorbar(im, ax=ax)
+            cbar.set_label("Contained PSF Flux [counts]")
+
+            ax[1].set(
+                ylabel=("Radius from Source [pix]"),
+                xlabel=("log$_{10}$ Source Flux"),
+            )
+            plt.show()
+        return source_radius_limit
+
     def simple_aperture_phot(self, space="pix-sq", plot=True):
         if space == "world":
             aper = (u.arcsecond * 2 * 4).to(u.deg).value  # aperture radii in deg
@@ -273,8 +417,9 @@ class EXBA(object):
             ]
         elif space == "pix-auto":
             if not hasattr(self, "radius"):
-                raise AttributeError(
-                    "No PSF radius computed, please run `_find_psf_edge()` first"
+                print("Computing PSF edges...")
+                self.radius = self._find_psf_edge(
+                    radius_limit=6, cut=150, plot=False, load=False
                 )
             # create circular aperture mask using PSF edges
             aperture_mask = [
@@ -294,7 +439,7 @@ class EXBA(object):
             bkg_std = sigma_clip(
                 mean_flux[bkg_mask],
                 sigma=3,
-                maxiters=3,
+                maxiters=5,
                 cenfunc=np.median,
                 masked=False,
                 copy=False,
@@ -302,7 +447,7 @@ class EXBA(object):
             snr_img = np.abs(mean_flux / bkg_std)
             self.snr_img = snr_img.reshape(self.col_2d.shape)
             # combine circular aperture with SNR > 5 mask
-            aperture_mask &= snr_img > 5
+            aperture_mask &= snr_img > 3
 
             if plot:
                 fig, ax = plt.subplots(figsize=(9, 7))
@@ -342,6 +487,13 @@ class EXBA(object):
                 plt.show()
 
         aperture_mask = np.asarray(aperture_mask)
+        aperture_mask_2d = aperture_mask.reshape(
+            self.sources.shape[0], self.flux_2d.shape[1], self.flux_2d.shape[2]
+        )
+        # clean aperture mask, remove isolated Pixels
+        aperture_mask_2d = clean_aperture_mask(aperture_mask_2d)
+        aperture_mask = aperture_mask_2d.reshape(aperture_mask.shape)
+
         sap = np.zeros((self.sources.shape[0], self.flux.shape[0]))
         sap_e = np.zeros((self.sources.shape[0], self.flux.shape[0]))
 
@@ -353,18 +505,22 @@ class EXBA(object):
             ]
 
         # check for light curves with zero flux
-        # zero_mask = np.all((sap == 0), axis=1)
-        # sap = sap[~zero_mask]
-        # sap_e = sap_e[~zero_mask]
-        # aperture_mask = aperture_mask[~zero_mask]
-        # self.bad_sources = pd.concat(
-        #     [self.bad_sources, self.sources[zero_mask]]
-        # ).reset_index(drop=True)
-        # self.sources = self.sources[~zero_mask].reset_index(drop=True)
+        zero_mask = np.all((sap == 0), axis=1)
+        sap = sap[~zero_mask]
+        sap_e = sap_e[~zero_mask]
+        aperture_mask = aperture_mask[~zero_mask]
+        aperture_mask_2d = aperture_mask_2d[~zero_mask]
+        self.gf = self.gf[~zero_mask]
+        self.dx = self.dx[~zero_mask]
+        self.dy = self.dy[~zero_mask]
+        self.radius = self.radius[~zero_mask]
+        self.bad_sources = pd.concat(
+            [self.bad_sources, self.sources[zero_mask]]
+        ).reset_index(drop=True)
+        self.sources = self.sources[~zero_mask].reset_index(drop=True)
 
-        self.aperture_mask = aperture_mask.reshape(
-            self.sources.shape[0], self.flux_2d.shape[1], self.flux_2d.shape[2]
-        )
+        self.aperture_mask = aperture_mask
+        self.aperture_mask_2d = aperture_mask_2d
         self.sap_lcs = lk.LightCurveCollection(
             [
                 lk.KeplerLightCurve(
@@ -381,112 +537,136 @@ class EXBA(object):
                     channel=int(self.channel),
                     ra=self.sources.ra[i],
                     dec=self.sources.dec[i],
-                ).remove_outliers(sigma=5)
+                )
                 for i in range(len(sap))
             ]
         )
         return
 
-    def _find_psf_edge(self, radius_limit=6, cut=300, plot=True):
+    def build_psf_model(self, plot=True):
 
-        mean_flux = np.nanmean(self.flux, axis=0).value
         r = np.hypot(self.dx, self.dy)
+        phi = np.arctan2(self.dy, self.dx)
+        mean_flux = np.nanmean(self.flux, axis=0).value
+        # assign the flux estimations to be used for mean flux normalization
+        flux_estimates = self.gf
+        radius = self._find_psf_edge(radius_limit=6, cut=50, plot=False, load=False)
+        source_mask = sparse.csr_matrix(r < radius[:, None])
+        # source_mask = sparse.csr_matrix(self.aperture_mask)
 
-        temp_mask = (r < radius_limit) & (self.gf < 1e7) & (self.gf > 1e4)
-        temp_mask &= temp_mask.sum(axis=0) == 1
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            f = np.log10((temp_mask.astype(float) * mean_flux))
-        weights = (
-            (self.flux_err ** 0.5).sum(axis=0) ** 0.5 / self.flux.shape[0]
-        ) * temp_mask
-        A = np.vstack(
-            [
-                r[temp_mask] ** 0,
-                r[temp_mask],
-                r[temp_mask] ** 2,
-                np.log10(self.gf[temp_mask]),
-                # np.log10(self.gf[temp_mask]) ** 2,
-            ]
-        ).T
-        k = np.isfinite(f[temp_mask])
-        for count in [0]:
-            sigma_w_inv = A[k].T.dot(A[k] / weights[temp_mask][k, None] ** 2)
-            B = A[k].T.dot(f[temp_mask][k] / weights[temp_mask][k] ** 2)
-            w = np.linalg.solve(sigma_w_inv, B)
-            res = np.ma.masked_array(f[temp_mask], ~k) - A.dot(w)
-            k &= ~sigma_clip(res, sigma=3).mask
-
-        test_f = np.linspace(
-            np.log10(self.gf.min()),
-            np.log10(self.gf.max()),
-            100,
+        # mean flux values using uncontaminated mask and normalized by flux estimations
+        mean_f = np.log10(
+            source_mask.astype(float)
+            .multiply(mean_flux)
+            .multiply(1 / flux_estimates)
+            .data
         )
-        test_r = np.arange(0, radius_limit, 0.25)
-        test_r2, test_f2 = np.meshgrid(test_r, test_f)
+        phi_b = source_mask.multiply(phi).data
+        r_b = source_mask.multiply(r).data
 
-        test_val = (
-            np.vstack(
-                [
-                    test_r2.ravel() ** 0,
-                    test_r2.ravel(),
-                    test_r2.ravel() ** 2,
-                    test_f2.ravel(),
-                    # test_f2.ravel() ** 2,
-                ]
-            )
-            .T.dot(w)
-            .reshape(test_r2.shape)
+        # build a design matrix A with b-splines basis in radius and angle axis.
+        A = make_A(phi_b.ravel(), r_b.ravel())
+        prior_sigma = np.ones(A.shape[1]) * 100
+        prior_mu = np.zeros(A.shape[1])
+        nan_mask = np.isfinite(mean_f.ravel())
+
+        # we solve for A * psf_w = mean_f
+        psf_w = solve_linear_model(
+            A,
+            mean_f.ravel(),
+            k=nan_mask,
+            prior_mu=prior_mu,
+            prior_sigma=prior_sigma,
         )
 
-        # find radius where flux > cut
-        l = np.zeros(len(test_f)) * np.nan
-        for idx in range(len(test_f)):
-            loc = np.where(10 ** test_val[idx] < cut)[0]
-            if len(loc) > 0:
-                l[idx] = test_r[loc[0]]
-        ok = np.isfinite(l)
-        source_radius_limit = np.polyval(
-            np.polyfit(test_f[ok], l[ok], 2), np.log10(self.gf[:, 0])
+        # We then build the same design matrix for all pixels with flux
+        Ap = make_A(
+            source_mask.multiply(phi).data,
+            source_mask.multiply(r).data,
         )
-        source_radius_limit[source_radius_limit > radius_limit] = radius_limit
-        self.radius = source_radius_limit
+
+        # And create a `mean_model` that has the psf model for all pixels with fluxes
+        mean_model = sparse.csr_matrix(r.shape)
+        m = 10 ** Ap.dot(psf_w)
+        mean_model[source_mask] = m
+        mean_model.eliminate_zeros()
+        self.mean_model = mean_model.multiply(1 / mean_model.sum(axis=1))
 
         if plot:
-            fig, ax = plt.subplots(1, 2, figsize=(14, 5), facecolor="white")
-
-            ax[0].scatter(r[temp_mask][k], f[temp_mask][k], s=0.4, c="k", label="Data")
-            ax[0].scatter(r[temp_mask][k], A[k].dot(w), c="r", s=0.4, label="Model")
-            ax[0].set(xlabel=("Radius [pix]"), ylabel=("log$_{10}$ Flux"))
-            ax[0].legend(frameon=True)
-
-            im = ax[1].pcolormesh(
-                test_f2,
-                test_r2,
-                10 ** test_val,
-                vmin=0,
-                vmax=500,
-                cmap="viridis",
-                shading="auto",
+            # Plotting r,phi,meanflux used to build PSF model
+            fig, ax = plt.subplots(1, 2, figsize=(9, 3))
+            ax[0].set_title("Mean flux")
+            cax = ax[0].scatter(
+                source_mask.multiply(phi).data,
+                source_mask.multiply(r).data,
+                c=mean_f,
+                marker=".",
             )
-            line = np.polyval(np.polyfit(test_f[ok], l[ok], 2), test_f)
-            line[line > radius_limit] = radius_limit
-            ax[1].plot(test_f, line, color="r", label="Mask threshold")
-            ax[1].legend(frameon=True)
-            cbar = plt.colorbar(im, ax=ax)
-            cbar.set_label("Contained PSF Flux [counts]")
+            ax[0].set_ylim(0, r_b.max())
+            fig.colorbar(cax, ax=ax[0])
+            ax[0].set_ylabel(r"$r$ [pixels]")
+            ax[0].set_xlabel(r"$\phi$ [rad]")
 
-            ax[1].set(
-                ylabel=("Radius from Source [pix]"),
-                xlabel=("log$_{10}$ Source Flux"),
+            r_test, phi_test = np.meshgrid(
+                np.linspace(0 ** 0.5, r_b.max() ** 0.5, 100) ** 2,
+                np.linspace(-np.pi + 1e-5, np.pi - 1e-5, 100),
             )
+            A_test = make_A(phi_test.ravel(), r_test.ravel())
+            model_test = A_test.dot(psf_w)
+            model_test = model_test.reshape(phi_test.shape)
+
+            ax[1].set_title("Average PSF Model")
+            # cax = ax[1].pcolormesh(phi_test, r_test, model_test, shading="auto")
+            cax = cax = ax[1].scatter(
+                source_mask.multiply(phi).data,
+                source_mask.multiply(r).data,
+                c=np.log10(m),
+                marker=".",
+            )
+            fig.colorbar(cax, ax=ax[1])
+            ax[1].set_xlabel(r"$\phi$ [rad]")
             plt.show()
+
         return
 
-    def apply_CBV(self, do_under=False, ignore_warnings=True):
+    def aperture_contamination(self):
+
+        # count total pixels per source in aperture_mask
+        N_pix = self.aperture_mask.sum(axis=1)
+        pix_w_signal = self.aperture_mask.sum(axis=0)
+        conta_pix_ratio = []
+        # contaminated pixels
+        for s in range(len(self.sources)):
+            sources_per_pix = pix_w_signal[self.aperture_mask[s]]
+            conta_pix_ratio.append((sources_per_pix > 1).sum() / N_pix[s])
+        self.fraction_of_contaminated_pixels = np.array(conta_pix_ratio)
+
+        # compute PSF models for all sources alone
+        self.build_psf_model(plot=False)
+        # mean_model.sum(axis=0) gives a model of the image from _parse_TPFs_channel
+        # if I divide each pixel value from the each source PSF models alone by the
+        # image models I'll get the contribution of that source to the total in that
+        # pixel
+        self.pixel_contamination = self.mean_model.multiply(
+            1 / self.mean_model.sum(axis=0)
+        )
+        N_pix = (self.mean_model.toarray() != 0).sum(axis=1)
+        self.source_contamination = 1 - (
+            self.pixel_contamination.toarray().sum(axis=1) / N_pix
+        )
+
+        return
+
+    def apply_flatten(self):
+        self.flatten_lcs = lk.LightCurveCollection(
+            [lc.flatten() for lc in self.sap_lcs]
+        )
+        return
+
+    def apply_CBV(self, do_under=False, ignore_warnings=True, plot=True):
         if ignore_warnings:
             warnings.filterwarnings("ignore", category=RuntimeWarning)
-            warnings.filterwarnings("ignore", category=lk.utils.LightkurveWarning)
+            warnings.filterwarnings("ignore", category=lk.LightkurveWarning)
 
         # Select which CBVs to use in the correction
         cbv_type = ["SingleScale"]
@@ -497,12 +677,40 @@ class EXBA(object):
         over_fit_m = []
         under_fit_m = []
         corrected_lcs = []
+        alpha = 1e-1
 
-        for lc in tqdm(self.sap_lcs, desc="Applying CBVs to LCs", leave=False):
-            lc = lc[lc.flux_err > 0]
+        # what if I optimize alpha for the first lc, then use that one for the rest?
+        for i in tqdm(
+            range(len(self.sap_lcs)), desc="Applying CBVs to LCs", leave=False
+        ):
+            lc = self.sap_lcs[i][self.sap_lcs[i].flux_err > 0].remove_outliers(
+                sigma_upper=5
+            )
             cbvcor = CBVCorrector(lc)
+            if i % 20 == 0:
+                print("Optimizing alpha")
+                try:
+                    cbvcor.correct(
+                        cbv_type=cbv_type,
+                        cbv_indices=cbv_indices,
+                        alpha_bounds=[1e-2, 1e2],
+                        target_over_score=0.9,
+                        target_under_score=0.8,
+                    )
+                    alpha = cbvcor.alpha
+                    if plot:
+                        cbvcor.diagnose()
+                        cbvcor.goodness_metric_scan_plot(
+                            cbv_type=cbv_type, cbv_indices=cbv_indices
+                        )
+                        plt.show()
+                except ValueError:
+                    print(
+                        "Alpha optimization failed, using previous value %.4f" % alpha
+                    )
+
             cbvcor.correct_gaussian_prior(
-                cbv_type=cbv_type, cbv_indices=cbv_indices, alpha=1e-4
+                cbv_type=cbv_type, cbv_indices=cbv_indices, alpha=alpha
             )
             over_fit_m.append(cbvcor.over_fitting_metric())
             if do_under:
@@ -515,17 +723,28 @@ class EXBA(object):
             self.under_fitting_metrics = np.array(under_fit_m)
         return
 
-    def store_data(self):
+    def store_data(self, all=False):
         out_path = os.path.dirname(self.tpfs_files[0])
         self.sources.to_csv("%s/gaia_dr2_xmatch.csv" % (out_path))
+
         lc_out_name = "sap_lcs"
         if hasattr(self, "corrected_lcs"):
             lc_to_save = self.corrected_lcs
             lc_out_name += "_CBVcorrected"
+        elif hasattr(self, "flatten_lcs"):
+            lc_to_save = self.flatten_lcs
+            lc_out_name += "_flattened"
         else:
             lc_to_save = self.sap_lcs
         with open("%s/%s.pkl" % (out_path, lc_out_name), "wb") as f:
             cPickle.dump(lc_to_save, f)
+
+        if hasattr(self, "period_df"):
+            self.period_df.to_csv("%s/bls_results.csv" % (out_path))
+
+        if all:
+            with open("%s/exba_object.pkl" % (out_path), "wb") as f:
+                cPickle.dump(self, f)
         return
 
     def check_for_rolling_band(self):
@@ -533,7 +752,7 @@ class EXBA(object):
         method to check if the exba patch suffers from rolling time-variable background
         noise, aka rolling band
         """
-        # create a background mask, use self.aperture_mask.sum(axis=0) == 0
+        # create a background mask, use self.aperture_mask_2d.sum(axis=0) == 0
 
         # compute background light curves
 
@@ -541,27 +760,37 @@ class EXBA(object):
 
         return
 
-    def do_bls_search(self, plot=False, test_lcs=None, n_boots=100):
+    def do_bls_search(self, test_lcs=None, n_boots=100, plot=False):
 
-        if not hasattr(self, "corrected_lcs"):
-            raise AttributeError(
-                "No CBV corrected light curves computed, run apply_CBV first"
-            )
         if test_lcs:
             search_here = list(test_lcs) if len(test_lcs) == 1 else test_lcs
         else:
-            search_here = self.corrected_lcs
+            if hasattr(self, "corrected_lcs"):
+                search_here = self.corrected_lcs
+                raise AttributeError(
+                    "No CBV corrected light curves computed, run apply_CBV first"
+                )
+            elif hasattr(self, "flatten_lcs"):
+                print("No CBV correction applied, using flatten light curves.")
+                search_here = self.flatten_lcs
+            else:
+                raise AttributeError(
+                    "No CBV corrected or flatten light curves were computed,"
+                    + " run `apply_CBV()` or `flatten()` first"
+                )
 
-        period_best, period_fap, power_snr = get_bls_periods(
+        period_best, period_fap, periods_snr = get_bls_periods(
             search_here, plot=plot, n_boots=n_boots
         )
 
         if test_lcs:
-            return period_best, period_fap, power_snr
+            return period_best, period_fap, periods_snr
         else:
-            self.periods = period_best
-            self.periods_fap = period_fap
-            self.periods_snr = power_snr
+            self.period_df = pd.DataFrame(
+                np.array([period_best, period_fap, periods_snr]).T,
+                columns=["period_best", "period_fap", "period_snr"],
+                index=self.sources.designation.values,
+            )
         return
 
     def plot_image(self, space="pixels", sources=True, **kwargs):
@@ -581,7 +810,7 @@ class EXBA(object):
             xlabel = "Decl."
 
         fig, ax = plt.subplots(1, 1, figsize=(15, 6))
-        fig.suptitle("EXBA block | Q: %i | Ch: %i" % (self.quarter, self.channel))
+        ax.set_title("EXBA block | Q: %i | Ch: %i" % (self.quarter, self.channel))
         pc = ax.pcolormesh(
             x,
             y,
@@ -603,83 +832,139 @@ class EXBA(object):
         ax.set_ylabel("Dec [deg]")
         fig.colorbar(pc, label=r"Flux ($e^{-}s^{-1}$)")
         ax.set_aspect("equal", adjustable="box")
+        plt.show()
+
+        return
+
+    def plot_stamp(self, source_idx=0, ax=None):
+
+        if isinstance(source_idx, str):
+            idx = np.where(self.sources.designation == source_idx)[0][0]
+            print(idx)
+        else:
+            idx = source_idx
+        if ax is None:
+            fig, ax = plt.subplots(1)
+        pc = ax.pcolor(
+            self.flux_2d[0],
+            shading="auto",
+            norm=colors.SymLogNorm(linthresh=50, vmin=3, vmax=5000, base=10),
+        )
+        ax.scatter(
+            self.sources.col - self.col.min() + 0.5,
+            self.sources.row - self.row.min() + 0.5,
+            s=20,
+            facecolors="y",
+            marker="o",
+            edgecolors="k",
+        )
+        ax.scatter(
+            self.sources.col.iloc[idx] - self.col.min() + 0.5,
+            self.sources.row.iloc[idx] - self.row.min() + 0.5,
+            s=25,
+            facecolors="r",
+            marker="o",
+            edgecolors="r",
+        )
+        ax.set_xlabel("Pixels")
+        ax.set_ylabel("Pixels")
+        plt.colorbar(pc, label=r"Flux ($e^{-}s^{-1}$)")
+        ax.set_aspect("equal", adjustable="box")
+
+        for i in range(self.ra_2d.shape[0]):
+            for j in range(self.ra_2d.shape[1]):
+                if self.aperture_mask_2d[idx, i, j]:
+                    rect = patches.Rectangle(
+                        xy=(j, i),
+                        width=1,
+                        height=1,
+                        color="red",
+                        fill=False,
+                        hatch="",
+                    )
+                    ax.add_patch(rect)
+        zoom = np.argwhere(self.aperture_mask_2d[idx] == True)
+        ax.set_ylim(
+            np.maximum(0, zoom[0, 0] - 5),
+            np.minimum(zoom[-1, 0] + 5, self.ra_2d.shape[0]),
+        )
+        ax.set_xlim(
+            np.maximum(0, zoom[0, -1] - 5),
+            np.minimum(zoom[-1, -1] + 5, self.ra_2d.shape[1]),
+        )
 
         return ax
 
-    def plot_lightcurves(self, object_id=None, step=10):
+    def plot_lightcurve(self, source_idx=0, ax=None):
+        if ax is None:
+            fig, ax = plt.subplots(1, figsize=(9, 3))
 
-        if object_id is None:
-            lcs = self.corrected_lcs if hasattr(self, "corrected_lcs") else self.sap_lcs
-            sources = self.sources
-            aperture_mask = self.aperture_mask
-            step = step
+        # if self.aperture_mask[].sum() == 0:
+        #     print("Warning: zero pixels in aperture mask.")
+        #     continue
+
+        if isinstance(source_idx, str):
+            s = np.where(self.sources.designation == source_idx)[0][0]
         else:
-            idx = np.in1d(self.sources.designation, np.array(object_id))
-            sources = self.sources[idx]
-            lcs = (
-                self.corrected_lcs[idx]
-                if hasattr(self, "corrected_lcs")
-                else self.sap_lcs[idx]
-            )
-            aperture_mask = self.aperture_mask[idx]
-            step = 1
+            s = source_idx
 
-        for s in range(0, len(sources), step):
-            if aperture_mask[s].sum() == 0:
-                print("Warning: zero pixels in aperture mask.")
-                continue
+        ax.set_title(
+            "Ch: %i | Q: %i | Source %s (%i)"
+            % (self.channel, self.quarter, self.sap_lcs[s].label, s)
+        )
+        if hasattr(self, "flatten_lcs"):
+            self.sap_lcs[s].normalize().plot(label="raw", ax=ax, c="k", alpha=0.4)
+            self.flatten_lcs[s].plot(label="flatten", ax=ax, c="k")
+            if hasattr(self, "corrected_lcs"):
+                self.corrected_lcs[s].normalize().plot(label="CBV", ax=ax, c="tab:blue")
+        else:
+            self.sap_lcs[s].plot(label="raw", ax=ax, c="k", alpha=0.4)
+            if hasattr(self, "corrected_lcs"):
+                self.corrected_lcs[s].plot(label="CBV", ax=ax, c="tab:blue")
 
+        return ax
+
+    def plot_lightcurves_stamps(self, which="all", step=1):
+
+        s_list = self.sources.index.values
+        if which != "all":
+            if isinstance(which[0], str):
+                s_list = s_list[np.in1d(self.sources.designation, which)]
+            else:
+                s_list = which
+        for s in s_list[::step]:
             fig, ax = plt.subplots(
                 1, 2, figsize=(15, 4), gridspec_kw={"width_ratios": [4, 1]}
             )
-
-            lcs[s].plot(label=lcs[s].targetid, ax=ax[0])
-
-            fig.suptitle(
-                "EXBA block | Q: %i | Ch: %i | Source %i"
-                % (self.quarter, self.channel, s)
-            )
-            pc = ax[1].pcolor(
-                self.flux_2d[0],
-                shading="auto",
-                norm=colors.SymLogNorm(linthresh=50, vmin=3, vmax=5000, base=10),
-            )
-            ax[1].scatter(
-                sources.col.iloc[s] - self.col.min() + 0.5,
-                sources.row.iloc[s] - self.row.min() + 0.5,
-                s=25,
-                facecolors="r",
-                marker="o",
-                edgecolors="r",
-            )
-            ax[1].set_xlabel("Pixels")
-            ax[1].set_ylabel("Pixels")
-            fig.colorbar(pc, label=r"Flux ($e^{-}s^{-1}$)")
-            ax[1].set_aspect("equal", adjustable="box")
-
-            for i in range(self.ra_2d.shape[0]):
-                for j in range(self.ra_2d.shape[1]):
-                    if aperture_mask[s, i, j]:
-                        rect = patches.Rectangle(
-                            xy=(j, i),
-                            width=1,
-                            height=1,
-                            color="red",
-                            fill=False,
-                            hatch="",
-                        )
-                        ax[1].add_patch(rect)
-            zoom = np.argwhere(aperture_mask[s] == True)
-            ax[1].set_ylim(
-                np.maximum(0, zoom[0, 0] - 5),
-                np.minimum(zoom[-1, 0] + 5, self.ra_2d.shape[0]),
-            )
-            ax[1].set_xlim(
-                np.maximum(0, zoom[0, -1] - 5),
-                np.minimum(zoom[-1, -1] + 5, self.ra_2d.shape[1]),
-            )
+            self.plot_lightcurve(source_idx=s, ax=ax[0])
+            self.plot_stamp(source_idx=s, ax=ax[1])
 
             plt.show()
+
+        return
+
+    def plot_source_stats(self):
+
+        # plot Color-Mag diagram
+        with np.errstate(invalid="ignore"):
+            self.sources["g_mag_abs"] = (
+                self.sources.phot_g_mean_mag + 5 * np.log10(self.sources.parallax) - 10
+            )
+        ax = sb.jointplot(
+            data=self.sources,
+            x="bp_rp",
+            y="g_mag_abs",
+            kind="scatter",
+            xlim=(-0.5, 4),
+            ylim=(16, -5),
+        )
+        # ax.fig.axes[0].invert_yaxis()
+        ax.fig.suptitle("Color-Magnitude Diagram", y=1.01)
+        ax.fig.axes[0].set_ylabel(r"$M_{g}$", fontsize=20)
+        ax.fig.axes[0].set_xlabel(r"$m_{bp} - m_{rp}$", fontsize=20)
+        plt.show()
+
+        return
 
 
 class EXBACollection(EXBA):
@@ -792,16 +1077,20 @@ class EXBALightCurveCollection:
         # check that gaia sources are in all quarters
         gids = [df.designation.tolist() for df in metadata]
         unique_gids = np.unique([item for sublist in gids for item in sublist])
+        print(unique_gids.shape)
 
         # create matris with index position to link sources across quarters
         # this asume that sources aren't in the same position in the DF, sources
         # can disapear (fall out the ccd), not all sources show up in all quarters.
         pm = np.empty((len(unique_gids), len(lcs)), dtype=np.int) * np.nan
-        for q in range(len(lcs)):
-            mask1 = np.in1d(metadata[q].designation.values, unique_gids)
-            mask2 = np.in1d(unique_gids, metadata[q].designation.values)
-            pm[mask2, q] = np.arange(len(metadata[q].designation.values))[mask1]
-
+        for k, id in enumerate(unique_gids):
+            for q in range(len(self.quarter)):
+                pos = np.where(id == metadata[q].designation.values)[0]
+                if len(pos) == 0:
+                    continue
+                else:
+                    # print(k, "here")
+                    pm[k, q] = pos
         # rearange sources as list of lk Collection containing all quarters per source
         sources = []
         for i, gid in enumerate(unique_gids):
@@ -838,7 +1127,7 @@ class EXBALightCurveCollection:
 
         return
 
-    def do_bls_search(self, plot=False, n_boots=100, fap_tresh=0.1):
+    def do_bls_search(self, plot=False, n_boots=100, fap_tresh=0.1, save=True):
 
         self.metadata["has_planet"] = False
         self.metadata["N_periodic_quarters"] = 0
@@ -847,9 +1136,7 @@ class EXBALightCurveCollection:
         self.metadata["Period_fap"] = None
 
         for lc_long in tqdm(self.lcs, desc="Gaia sources"):
-
             periods, faps, snrs = get_bls_periods(lc_long, plot=plot, n_boots=n_boots)
-            print(periods, faps, snrs)
             # check for significant periodicity detection in at least one quarter
             if np.isfinite(faps).all():
                 p_mask = faps < fap_tresh
@@ -879,7 +1166,31 @@ class EXBALightCurveCollection:
                     self.metadata["Period_fap"].iloc[idx] = good_faps[all_close].mean()
                     self.metadata["Period_snr"].iloc[idx] = good_snrs[all_close].mean()
                 # check if periods are harmonics
-            break
+            # break
+        if save:
+            cols = [
+                "designation",
+                "source_id",
+                "ref_epoch",
+                "ra",
+                "ra_error",
+                "dec",
+                "dec_error",
+                "has_planet",
+                "N_periodic_quarters",
+                "Period",
+                "Period_snr",
+                "Period_fap",
+            ]
+            if len(self.channel) == 1:
+                ch_str = "%i" % (self.channel[0])
+            else:
+                ch_str = "%i-%i" % (self.channel[0], self.channel[-1])
+            outname = "BLS_results_ch%s.csv" % (ch_str)
+            print("Saving data to --> %s/data/bls_results/%s" % (main_path, outname))
+            self.metadata.loc[:, cols].to_csv(
+                "%s/data/bls_results/%s" % (main_path, outname)
+            )
 
     @staticmethod
     def from_stored_lcs(channels, quarters):
@@ -902,12 +1213,7 @@ class EXBALightCurveCollection:
                     nodata.append([ch, q])
                     continue
                 df = pd.read_csv(df_path)
-                lc = cPickle.load(
-                    open(
-                        lc_path,
-                        "rb",
-                    )
-                )
+                lc = cPickle.load(open(lc_path, "rb"))
                 metadata.append(df)
                 lcs.append(lc)
 
