@@ -767,9 +767,6 @@ class EXBA(object):
         else:
             if hasattr(self, "corrected_lcs"):
                 search_here = self.corrected_lcs
-                raise AttributeError(
-                    "No CBV corrected light curves computed, run apply_CBV first"
-                )
             elif hasattr(self, "flatten_lcs"):
                 print("No CBV correction applied, using flatten light curves.")
                 search_here = self.flatten_lcs
