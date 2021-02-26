@@ -1,4 +1,6 @@
 .DS_Store
 .virtual_documents/
 .data
+exba/.python-version
+.python-version
 notebooks/.ipynb_checkpoints
