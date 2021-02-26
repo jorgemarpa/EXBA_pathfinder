@@ -112,6 +112,22 @@ def _make_A(phi, r, cut_r=5):
     return X1
 
 
+def make_A_edges(r, f, type="cuadratic"):
+    if type == "linear":
+        A = np.vstack([r ** 0, r, f]).T
+    elif type == "cuadratic":
+        A = np.vstack([r ** 0, r, r ** 2, f]).T
+    elif type == "cubic":
+        A = np.vstack([r ** 0, r, r ** 2, r ** 3, f]).T
+    elif type == "exp":
+        A = np.vstack([r ** 0, np.exp(-r), f]).T
+    elif type == "inverse":
+        A = np.vstack([r ** 0, 1 / r, f]).T
+    else:
+        print("Wrong desing matrix basis type")
+    return A
+
+
 def wrapped_spline(input_vector, order=2, nknots=10):
     """
     Creates a vector of folded-spline basis according to the input data. This is meant
@@ -204,8 +220,8 @@ def get_bls_periods(lcs, plot=False, n_boots=100):
     period_best, period_fap, snr = [], [], []
     pmin, pmax, ffac = 0.5, 20, 10
 
-    for lc in tqdm(lcs, desc="BLS search"):
-        lc = lc.remove_outliers(sigma_lower=20, sigma_upper=5)
+    for lc in tqdm(lcs, desc="BLS search", leave=False):
+        lc = lc.remove_outliers(sigma_lower=1e10, sigma_upper=5)
         periodogram = lc.to_periodogram(
             method="bls",
             minimum_period=pmin,
@@ -368,7 +384,9 @@ def clean_aperture_mask(mask):
 def make_A(phi, r, cut_r=5):
     """ Make spline design matrix in polar coordinates """
     phi_spline = sparse.csr_matrix(wrapped_spline(phi, order=3, nknots=6).T)
-    r_knots = np.linspace(0.125 ** 0.5, 2.5 ** 0.5, 8) ** 2
+    low_knot = np.percentile(r, 3)
+    upp_knot = np.percentile(r, 90)
+    r_knots = np.linspace(low_knot ** 0.5, upp_knot ** 0.5, 8) ** 2
     r_spline = sparse.csr_matrix(
         np.asarray(
             dmatrix(
