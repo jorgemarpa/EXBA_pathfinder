@@ -69,7 +69,7 @@ args = parser.parse_args()
 r_min, r_max = 20, 1044
 c_min, c_max = 12, 1112
 
-remove_sat = True
+remove_sat = False
 sample_sources = False
 N_sample = 500
 
@@ -181,8 +181,8 @@ def clean_source_list(sources):
 def _saturated_pixels_mask(flux, column, row, saturation_limit=1.5e5):
     """Finds and removes saturated pixels, including bleed columns."""
     # Which pixels are saturated
-    saturated = np.nanpercentile(flux, 99, axis=0)
-    saturated = np.where((saturated > saturation_limit).astype(float))[0]
+    # saturated = np.nanpercentile(flux, 99, axis=0)
+    saturated = np.where((flux > saturation_limit).astype(float))[0]
 
     # Find bad pixels, including allowence for a bleed column.
     bad_pixels = np.vstack(
