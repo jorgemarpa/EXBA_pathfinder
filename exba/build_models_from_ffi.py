@@ -441,6 +441,8 @@ def run_code(Q=5, CH=1):
     print(
         "Will query with this (ra, dec, radius, epoch): ", ra_q, dec_q, rad, time.jyear
     )
+    if ra_q[0] > 360 or np.abs(dec_q[0]) > 90 or rad[0] > 5:
+        raise ValueError("Query values are out of bound, please check WCS solution.")
     sources = do_query(ra_q, dec_q, rad, time.jyear, Q, CH)
     sources["col"], sources["row"] = wcs.all_world2pix(
         sources.loc[:, ["ra", "dec"]].values, 0.5
