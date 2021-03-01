@@ -5,14 +5,14 @@ import warnings
 import numpy as np
 import pandas as pd
 import seaborn as sb
-import _pickle as cPickle
+import pickle
 import lightkurve as lk
 from lightkurve.correctors import CBVCorrector
 from scipy import sparse
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from matplotlib import patches
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import astropy.units as u
 from astropy.time import Time
 from astropy.coordinates import SkyCoord, match_coordinates_3d
@@ -191,7 +191,9 @@ class EXBA(object):
 
         return ra, dec
 
-    def _get_coord_and_query_gaia(rself, ra, dec, unw, epoch=2020, magnitude_limit=20):
+    def _get_coord_and_query_gaia(
+        self, ra, dec, unw, epoch=2020, magnitude_limit=20, load=True
+    ):
         """
         Calculate ra, dec coordinates and search radius to query Gaia catalog
 
@@ -212,26 +214,38 @@ class EXBA(object):
         sources : pandas.DataFrame
             Catalog with query result
         """
-        # find the max circle per TPF that contain all pixel data to query Gaia
-        ras, decs, rads = [], [], []
-        for l in np.unique(unw[0]):
-            ra1 = ra[unw[0] == l]
-            dec1 = dec[unw[0] == l]
-            ras.append(ra1.mean())
-            decs.append(dec1.mean())
-            rads.append(
-                np.hypot(ra1 - ra1.mean(), dec1 - dec1.mean()).max()
-                + (u.arcsecond * 6).to(u.deg).value
-            )
-        # query Gaia with epoch propagation
-        sources = get_gaia_sources(
-            tuple(ras),
-            tuple(decs),
-            tuple(rads),
-            magnitude_limit=magnitude_limit,
-            epoch=Time(epoch, format="jd").jyear,
-            gaia="dr2",
+        file_name = "%s/data/EXBA/%i/%i/gaia_xmatch_query_result.csv" % (
+            main_path,
+            self.channel,
+            self.quarter,
         )
+        if os.path.isfile(file_name) and load:
+            print("Loading query from file...")
+            print(file_name)
+            sources = pd.read_csv(file_name)
+
+        else:
+            # find the max circle per TPF that contain all pixel data to query Gaia
+            ras, decs, rads = [], [], []
+            for l in np.unique(unw[0]):
+                ra1 = ra[unw[0] == l]
+                dec1 = dec[unw[0] == l]
+                ras.append(ra1.mean())
+                decs.append(dec1.mean())
+                rads.append(
+                    np.hypot(ra1 - ra1.mean(), dec1 - dec1.mean()).max()
+                    + (u.arcsecond * 6).to(u.deg).value
+                )
+            # query Gaia with epoch propagation
+            sources = get_gaia_sources(
+                tuple(ras),
+                tuple(decs),
+                tuple(rads),
+                magnitude_limit=magnitude_limit,
+                epoch=Time(epoch, format="jd").jyear,
+                gaia="dr2",
+            )
+            sources.to_csv(file_name)
         return sources
 
     def _clean_source_list(self, sources, ra, dec):
@@ -274,7 +288,7 @@ class EXBA(object):
         return sources, removed_sources
 
     def _find_psf_edge(
-        self, radius_limit=6, cut=300, dm_type="cuadratic", plot=True, load=False
+        self, radius_limit=6, cut=300, dm_type="cubic", plot=True, load=True, show=False
     ):
 
         mean_flux = np.nanmean(self.flux, axis=0).value
@@ -301,7 +315,7 @@ class EXBA(object):
         A = make_A_edges(r[temp_mask], np.log10(self.gf[temp_mask]), type=dm_type)
 
         if load and os.path.isfile(model_path):
-            aux = cPickle.load(open(model_path, "rb"))
+            aux = pickle.load(open(model_path, "rb"))
             w = aux["w"]
             del aux
         else:
@@ -368,10 +382,22 @@ class EXBA(object):
                 ylabel=("Radius from Source [pix]"),
                 xlabel=("log$_{10}$ Source Flux"),
             )
-            plt.show()
+            fig_name = "%s/data/EXBA/%i/%i/psf_edges.png" % (
+                main_path,
+                self.channel,
+                self.quarter,
+            )
+            if show:
+                plt.show()
+            else:
+                plt.savefig(fig_name, format="png")
+                plt.clf()
+
         return source_radius_limit
 
-    def find_aperture(self, space="pix-sq", plot=True, cut=150, remove_blank=True):
+    def find_aperture(
+        self, space="pix-sq", plot=True, cut=150, remove_blank=True, show=False
+    ):
         if space == "world":
             aper = (u.arcsecond * 2 * 4).to(u.deg).value  # aperture radii in deg
             aperture_mask = [
@@ -394,7 +420,12 @@ class EXBA(object):
         elif space == "pix-auto":
             # print("Computing PSF edges...")
             self.radius = self._find_psf_edge(
-                radius_limit=6, cut=cut, plot=plot, load=False
+                radius_limit=6,
+                cut=cut,
+                plot=plot,
+                load=True,
+                dm_type="cubic",
+                show=show,
             )
             # create circular aperture mask using PSF edges
             aperture_mask = [
@@ -458,8 +489,16 @@ class EXBA(object):
                                 alpha=0.2,
                             )
                             ax.add_patch(rect)
-
-                plt.show()
+                fig_name = "%s/data/EXBA/%i/%i/bkg_mask.png" % (
+                    main_path,
+                    self.channel,
+                    self.quarter,
+                )
+                if show:
+                    plt.show()
+                else:
+                    plt.savefig(fig_name, format="png")
+                    plt.clf()
 
         aperture_mask = np.asarray(aperture_mask)
         aperture_mask_2d = aperture_mask.reshape(
@@ -526,7 +565,7 @@ class EXBA(object):
         )
         return
 
-    def _build_psf_model(self, plot=True, load=False):
+    def _build_psf_model(self, plot=True, load=True, show=False):
         warnings.filterwarnings("ignore", category=sparse.SparseEfficiencyWarning)
 
         r = np.hypot(self.dx, self.dy)
@@ -534,7 +573,9 @@ class EXBA(object):
         mean_flux = np.nanmean(self.flux, axis=0).value
         # assign the flux estimations to be used for mean flux normalization
         flux_estimates = self.gf
-        radius = self._find_psf_edge(radius_limit=6, cut=50, plot=False, load=False)
+        radius = self._find_psf_edge(
+            radius_limit=6, cut=50, plot=False, load=load, dm_type="cubic"
+        )
         source_mask = sparse.csr_matrix(r < radius[:, None])
 
         # mean flux values using uncontaminated mask and normalized by flux estimations
@@ -552,8 +593,8 @@ class EXBA(object):
             self.quarter,
             self.channel,
         )
-        if load and os.path.isfile(model_path):
-            aux = cPickle.load(open(model_path, "rb"))
+        if load and os.path.isfile(model_path) and load:
+            aux = pickle.load(open(model_path, "rb"))
             psf_w = aux["psf_w"]
             del aux
         else:
@@ -630,11 +671,20 @@ class EXBA(object):
             fig.colorbar(cax, ax=ax[2])
             ax[2].set_xlabel(r"$\phi$ [rad]")
 
-            plt.show()
+            fig_name = "%s/data/EXBA/%i/%i/psf_model.png" % (
+                main_path,
+                self.channel,
+                self.quarter,
+            )
+            if show:
+                plt.show()
+            else:
+                plt.savefig(fig_name, format="png")
+                plt.clf()
 
         return
 
-    def contamination_metrics(self):
+    def contamination_metrics(self, plot=False):
         warnings.filterwarnings("ignore", category=RuntimeWarning)
 
         # count total pixels per source in aperture_mask
@@ -645,76 +695,97 @@ class EXBA(object):
         for s in range(len(self.sources)):
             sources_per_pix = pix_w_signal[self.aperture_mask[s]]
             conta_pix_ratio.append((sources_per_pix > 1).sum() / N_pix[s])
-        self.fraction_of_contaminated_pixels = np.array(conta_pix_ratio)
+        self.FRCPIXSAP = 1 - np.array(conta_pix_ratio)
 
         # compute PSF models for all sources alone
-        self._build_psf_model(plot=False)
+        self._build_psf_model(plot=False, load=True)
         # mean_model.sum(axis=0) gives a model of the image from PSF model
         # if I divide each pixel value from the each source PSF models alone by the
         # image models I'll get the contribution of that source to the total in that
         # pixel
-        self.pixel_contamination = self.mean_model.multiply(
-            1 / self.mean_model.sum(axis=0)
-        ).toarray()
-
         # apply aperture mask to PSF models, then sum aperture contribution and divide
         # by the total pixels to get the % of flux from that source.
-        self.source_contamination = (
-            np.array(
-                [
-                    self.pixel_contamination[s, self.aperture_mask[s]].sum()
-                    for s in range(len(self.sources))
-                ]
-            )
+        self.CROWDSAP = (
+            self.mean_model.multiply(1 / self.mean_model.sum(axis=0))
+            .multiply(self.aperture_mask.astype(float))
+            .toarray()
+            .sum(axis=1)
             / N_pix
         )
 
+        FLFRCSAP = self.mean_model.multiply(self.aperture_mask.astype(float)).sum(
+            axis=1
+        ) / self.mean_model.sum(axis=1)
+        self.FLFRCSAP = np.array(FLFRCSAP).ravel()
+
         return
 
-    def optimize_aperture(self, plot=True):
+    def optimize_aperture(self, plot=True, show=False):
 
         cuts = np.arange(50, 300, 10)
-        radius, metrics = [], []
+        radius, complet, crowd = [], [], []
         for i, cut in enumerate(cuts):
             self.find_aperture(
                 space="pix-auto", plot=False, cut=cut, remove_blank=False
             )
             radius.append(self.radius)
             self.contamination_metrics()
-            metrics.append(self.source_contamination)
+            complet.append(self.FLFRCSAP)
+            crowd.append(self.CROWDSAP)
         radius = np.array(radius)
-        metrics = np.array(metrics)
+        complet = np.array(complet)
+        crowd = np.array(crowd)
+        median_complet = np.nanmedian(complet, axis=1)
+        median_crowd = np.nanmedian(crowd, axis=1)
 
         try:
-            optim_cut = cuts[np.nanmedian(metrics, axis=1) >= 0.98][0]
+            compl_above = median_complet >= 0.98
+            if len(np.unique(median_crowd[compl_above])) == 1:
+                optim_cut = cuts[compl_above][0]
+            else:
+                optim_cut = cuts[compl_above][-1]
         except IndexError:
-            optim_cut = cuts[np.argmax(np.nanmedian(metrics, axis=1))]
+            optim_cut = cuts[np.argmax(median_complet)]
             if not np.isfinite(optim_cut):
                 optim_cut = 120
         self.optim_cut = optim_cut
 
         if plot:
-            fig, ax = plt.subplots(1, 2, figsize=(9, 4))
+            fig, ax = plt.subplots(1, 3, figsize=(15, 4))
 
             for s in range(0, self.sources.shape[0]):
                 ax[0].plot(cuts, radius[:, s], alpha=0.4)
-                ax[1].plot(cuts, metrics[:, s], alpha=0.4)
+                ax[1].plot(cuts, complet[:, s], alpha=0.4)
+                ax[2].plot(cuts, crowd[:, s], alpha=0.4)
 
             ax[0].plot(cuts, np.nanmedian(radius, axis=1), alpha=1, label="Mean", c="k")
-            ax[1].plot(
-                cuts, np.nanmedian(metrics, axis=1), alpha=1, label="Mean", c="k"
-            )
+            ax[1].plot(cuts, median_complet, alpha=1, label="Mean", c="k")
+            ax[2].plot(cuts, median_crowd, alpha=1, label="Mean", c="k")
+
             ax[0].axvline(optim_cut, c="tab:red", ls="--", label="%i" % (optim_cut))
             ax[1].axvline(optim_cut, c="tab:red", ls="--", label="%i" % (optim_cut))
+            ax[2].axvline(optim_cut, c="tab:red", ls="--", label="%i" % (optim_cut))
             ax[0].legend(loc="upper right")
 
             ax[0].set_ylabel("Radius PSF edge [pix]")
             ax[0].set_xlabel("Enclosed Flux Cut")
 
-            ax[1].set_ylabel("Fraction of Source Flux (1-Contamination)")
+            ax[1].set_ylabel("FLFRCSAP")
             ax[1].set_xlabel("Enclosed Flux Cut")
 
-            plt.show()
+            ax[2].set_ylabel("CROWDSAP")
+            ax[2].set_xlabel("Enclosed Flux Cut")
+
+            fig_name = "%s/data/EXBA/%i/%i/aperture_optim.png" % (
+                main_path,
+                self.channel,
+                self.quarter,
+            )
+            if show:
+                plt.show()
+            else:
+                plt.savefig(fig_name, format="png")
+                plt.clf()
 
         return
 
@@ -800,14 +871,14 @@ class EXBA(object):
         else:
             lc_to_save = self.sap_lcs
         with open("%s/%s.pkl" % (out_path, lc_out_name), "wb") as f:
-            cPickle.dump(lc_to_save, f)
+            pickle.dump(lc_to_save, f)
 
         if hasattr(self, "period_df"):
             self.period_df.to_csv("%s/bls_results.csv" % (out_path))
 
         if all:
             with open("%s/exba_object.pkl" % (out_path), "wb") as f:
-                cPickle.dump(self, f)
+                pickle.dump(self, f)
         return
 
     def check_for_rolling_band(self):
@@ -900,7 +971,6 @@ class EXBA(object):
 
         if isinstance(source_idx, str):
             idx = np.where(self.sources.designation == source_idx)[0][0]
-            print(idx)
         else:
             idx = source_idx
         if ax is None:
@@ -958,10 +1028,6 @@ class EXBA(object):
     def plot_lightcurve(self, source_idx=0, ax=None):
         if ax is None:
             fig, ax = plt.subplots(1, figsize=(9, 3))
-
-        # if self.aperture_mask[].sum() == 0:
-        #     print("Warning: zero pixels in aperture mask.")
-        #     continue
 
         if isinstance(source_idx, str):
             s = np.where(self.sources.designation == source_idx)[0][0]
@@ -1200,7 +1266,7 @@ class EXBALightCurveCollection:
     def store_lightcurves(self):
         self.metadata.to_csv("%s/data/lcs/metadata.csv" % (main_path))
         with open("%s/data/lcs/long_lcs.pkl" % (main_path), "wb") as f:
-            cPickle.dump(self.lcs, f)
+            pickle.dump(self.lcs, f)
 
     def stitch_quarters(self):
 
@@ -1323,7 +1389,7 @@ class EXBALightCurveCollection:
                     nodata.append([q, ch])
                     continue
                 df = pd.read_csv(df_path)
-                lc = cPickle.load(open(lc_path, "rb"))
+                lc = pickle.load(open(lc_path, "rb"))
                 pdf = pd.read_csv(period_path)
                 metadata_.append(df)
                 lcs_.extend(lc)
