@@ -43,12 +43,15 @@ class EXBA(object):
                 % (main_path, str(channel), str(quarter))
             )
         )
+        if len(tpfs_paths) == 0:
+            raise FileNotFoundError("No FITS file for this channel/quarter.")
         self.tpfs_files = tpfs_paths
 
         tpfs = lk.TargetPixelFileCollection(
             [lk.KeplerTargetPixelFile(f) for f in tpfs_paths]
         )
         self.tpfs = tpfs
+        print(self.tpfs)
         # check for same channels and quarter
         channels = [tpf.get_header()["CHANNEL"] for tpf in tpfs]
         quarters = [tpf.get_header()["QUARTER"] for tpf in tpfs]
@@ -390,7 +393,7 @@ class EXBA(object):
             if show:
                 plt.show()
             else:
-                plt.savefig(fig_name, format="png")
+                plt.savefig(fig_name, format="png", bbox_inches="tight")
                 plt.clf()
 
         return source_radius_limit
@@ -433,11 +436,6 @@ class EXBA(object):
                 for r, (_, s) in zip(self.radius, self.sources.iterrows())
             ]
             # create a background mask
-            sq_ap = [
-                (np.abs(self.col - np.floor(s.col)) < 5)
-                & (np.abs(self.row - np.floor(s.row)) < 5)
-                for _, s in self.sources.iterrows()
-            ]
             bkg_mask = np.asarray(aperture_mask).sum(axis=0) == 0
             self.bkg_mask = bkg_mask.reshape(self.col_2d.shape)
             # compute a SNR image
@@ -497,7 +495,7 @@ class EXBA(object):
                 if show:
                     plt.show()
                 else:
-                    plt.savefig(fig_name, format="png")
+                    plt.savefig(fig_name, format="png", bbox_inches="tight")
                     plt.clf()
 
         aperture_mask = np.asarray(aperture_mask)
@@ -630,7 +628,7 @@ class EXBA(object):
         if plot:
             # Plotting r,phi,meanflux used to build PSF model
             ylim = r_b.max() * 1.1
-            vmin, vmax = mean_f.min(), mean_f.max()
+            vmin, vmax = np.nanmin(mean_f), np.nanmax(mean_f)
             fig, ax = plt.subplots(1, 3, figsize=(15, 3))
             ax[0].set_title("Mean flux")
             cax = ax[0].scatter(
@@ -679,7 +677,7 @@ class EXBA(object):
             if show:
                 plt.show()
             else:
-                plt.savefig(fig_name, format="png")
+                plt.savefig(fig_name, format="png", bbox_inches="tight")
                 plt.clf()
 
         return
@@ -698,7 +696,7 @@ class EXBA(object):
         self.FRCPIXSAP = 1 - np.array(conta_pix_ratio)
 
         # compute PSF models for all sources alone
-        self._build_psf_model(plot=False, load=True)
+        self._build_psf_model(plot=plot, load=True)
         # mean_model.sum(axis=0) gives a model of the image from PSF model
         # if I divide each pixel value from the each source PSF models alone by the
         # image models I'll get the contribution of that source to the total in that
@@ -729,25 +727,22 @@ class EXBA(object):
                 space="pix-auto", plot=False, cut=cut, remove_blank=False
             )
             radius.append(self.radius)
-            self.contamination_metrics()
+            self.contamination_metrics(plot=False)
             complet.append(self.FLFRCSAP)
             crowd.append(self.CROWDSAP)
         radius = np.array(radius)
         complet = np.array(complet)
         crowd = np.array(crowd)
         median_complet = np.nanmedian(complet, axis=1)
-        median_crowd = np.nanmedian(crowd, axis=1)
+        median_crowd = np.nanmean(crowd, axis=1)
 
         try:
-            compl_above = median_complet >= 0.98
-            if len(np.unique(median_crowd[compl_above])) == 1:
-                optim_cut = cuts[compl_above][0]
-            else:
-                optim_cut = cuts[compl_above][-1]
-        except IndexError:
-            optim_cut = cuts[np.argmax(median_complet)]
+            compl_above = median_complet >= 0.90
+            optim_cut = cuts[np.argmax(median_crowd[compl_above])]
+        except (IndexError, ValueError):
+            optim_cut = cuts[np.argmax(median_crowd)]
             if not np.isfinite(optim_cut):
-                optim_cut = 120
+                optim_cut = 150
         self.optim_cut = optim_cut
 
         if plot:
@@ -784,7 +779,7 @@ class EXBA(object):
             if show:
                 plt.show()
             else:
-                plt.savefig(fig_name, format="png")
+                plt.savefig(fig_name, format="png", bbox_inches="tight")
                 plt.clf()
 
         return
@@ -924,7 +919,7 @@ class EXBA(object):
             )
         return
 
-    def plot_image(self, space="pixels", sources=True, **kwargs):
+    def plot_image(self, space="pixels", sources=True, ax=None):
         if space == "pixels":
             x = self.col_2d
             y = self.row_2d
@@ -940,8 +935,9 @@ class EXBA(object):
             xlabel = "R.A."
             xlabel = "Decl."
 
-        fig, ax = plt.subplots(1, 1, figsize=(15, 6))
-        ax.set_title("EXBA block | Q: %i | Ch: %i" % (self.quarter, self.channel))
+        if ax is None:
+            fig, ax = plt.subplots(1, figsize=(5, 7))
+        ax.set_title("EXBA | Q: %i | Ch: %i" % (self.quarter, self.channel))
         pc = ax.pcolormesh(
             x,
             y,
@@ -965,7 +961,7 @@ class EXBA(object):
         ax.set_aspect("equal", adjustable="box")
         plt.show()
 
-        return
+        return ax
 
     def plot_stamp(self, source_idx=0, ax=None):
 
@@ -1040,15 +1036,17 @@ class EXBA(object):
         )
         if hasattr(self, "flatten_lcs"):
             self.sap_lcs[s].normalize().plot(label="raw", ax=ax, c="k", alpha=0.4)
-            self.flatten_lcs[s].plot(label="flatten", ax=ax, c="k", offset=0.2)
+            self.flatten_lcs[s].plot(label="flatten", ax=ax, c="k", offset=-0.02)
             if hasattr(self, "corrected_lcs"):
                 self.corrected_lcs[s].normalize().plot(
-                    label="CBV", ax=ax, c="tab:blue", offset=0.4
+                    label="CBV", ax=ax, c="tab:blue", offset=+0.04
                 )
         else:
             self.sap_lcs[s].plot(label="raw", ax=ax, c="k", alpha=0.4)
             if hasattr(self, "corrected_lcs"):
-                self.corrected_lcs[s].plot(label="CBV", ax=ax, c="tab:blue", offset=0.2)
+                self.corrected_lcs[s].plot(
+                    label="CBV", ax=ax, c="tab:blue", offset=-0.02
+                )
 
         return ax
 
@@ -1092,103 +1090,6 @@ class EXBA(object):
         ax.fig.axes[0].set_xlabel(r"$m_{bp} - m_{rp}$", fontsize=20)
         plt.show()
 
-        return
-
-
-class EXBACollection(EXBA):
-    def __init__(self, EXBAs):
-
-        # check if each element of exba_quarters are EXBA objects
-        # if not all([isinstance(exba, EXBA) for exba in EXBAs]):
-        #     raise AssertionError("All elements of the list must be EXBA objects")
-
-        self.channel = EXBAs[0].channel
-        self.quarter = [exba.quarter for exba in EXBAs]
-
-        # check that gaia sources are in all quarters
-        gids = [exba.sources.designation.tolist() for exba in EXBAs]
-        unique_gids = np.unique([item for sublist in gids for item in sublist])
-
-        # create matris with index position to link sources across quarters
-        # this asume that sources aren't in the same position in the DF, sources
-        # can disapear (fall out the ccd), not all sources show up in all quarters.
-        pm = np.empty((len(unique_gids), len(EXBAs)), dtype=np.int) * np.nan
-        for q in range(len(EXBAs)):
-            mask1 = np.in1d(EXBAs[q].sources.designation.values, unique_gids)
-            mask2 = np.in1d(unique_gids, EXBAs[q].sources.designation.values)
-            pm[mask2, q] = np.arange(len(EXBAs[q].sources.designation.values))[mask1]
-
-        # rearange sources as list of lk Collection containing all quarters per source
-        sources = []
-        for i, gid in enumerate(unique_gids):
-            aux = lk.LightCurveCollection(
-                [
-                    EXBAs[q].sap_lcs[int(pos)]
-                    for q, pos in enumerate(pm[i])
-                    if np.isfinite(pos)
-                ]
-            )
-            sources.append(lk.LightCurveCollection(aux))
-        self.source_lcs = sources
-
-    def __repr__(self):
-        q_result = ",".join([str(k) for k in list([self.quarter])])
-        return "EXBA Patch:\n\t Channel %i, Quarter %s, Gaia sources %i" % (
-            self.channel,
-            q_result,
-            len(self.source_lcs),
-        )
-
-    def stitch_quarters(self):
-
-        # lk.LightCurveCollection.stitch() normalize by default all lcs before stitching
-        if hasattr(self, "source_lcs"):
-            self.stitched_lcs = lk.LightCurveCollection(
-                [lc.stitch() for lc in self.source_lcs]
-            )
-        if hasattr(self, "corrected_lcs"):
-            self.stitched_corrected_lcs = lk.LightCurveCollection(
-                [lc.stitch() for lc in self.corrected_lcs]
-            )
-
-        return
-
-    def apply_CBV(self, ignore_warnings=True, do_under=False):
-
-        if ignore_warnings:
-            warnings.filterwarnings("ignore", category=RuntimeWarning)
-
-        # Select which CBVs to use in the correction
-        cbv_type = ["SingleScale"]
-        # Select which CBV indices to use
-        # Use the first 8 SingleScale and all Spike CBVS
-        cbv_indices = [np.arange(1, 9)]
-
-        over_fit_m = []
-        under_fit_m = []
-        corrected_lcs = []
-
-        for source_lc in tqdm(self.source_lcs, desc="Gaia sources"):
-            tmp, tmp_over, tmp_under = [], [], []
-            for i, lc in enumerate(source_lc):
-                lc = lc[lc.flux_err > 0]
-                cbvcor = CBVCorrector(lc)
-                cbvcor.correct_gaussian_prior(
-                    cbv_type=cbv_type, cbv_indices=cbv_indices, alpha=1e-4
-                )
-                tmp_over.append(cbvcor.over_fitting_metric())
-                if do_under:
-                    tmp_under.append(cbvcor.under_fitting_metric())
-                tmp.append(cbvcor.corrected_lc)
-            tmp = lk.LightCurveCollection(tmp)
-            corrected_lcs.append(tmp)
-            over_fit_m.append(np.array(tmp_over))
-            if do_under:
-                under_fit_m.append(np.array(tmp_under))
-        self.corrected_lcs = corrected_lcs
-        self.over_fitting_metrics = np.asarray(over_fit_m, dtype=object)
-        if do_under:
-            self.under_fitting_metrics = np.asarray(under_fit_m, dtype=object)
         return
 
 
