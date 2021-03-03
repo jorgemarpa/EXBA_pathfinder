@@ -6,4 +6,6 @@ figures/*
 figures
 exba/.python-version
 .python-version
+exba/__pycache__*
+exba/__pycache__/*
 notebooks/.ipynb_checkpoints
