@@ -1,6 +1,9 @@
 .DS_Store
 .virtual_documents/
-.data
+data/*
+data
+figures/*
+figures
 exba/.python-version
 .python-version
 notebooks/.ipynb_checkpoints
