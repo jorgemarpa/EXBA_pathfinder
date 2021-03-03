@@ -287,7 +287,7 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
         line = np.polyval(np.polyfit(test_f[ok], l[ok], 2), test_f)
         line[line > radius_limit] = radius_limit
         ax[1].plot(test_f, line, color="r", label="Mask threshold")
-        ax[1].legend(frameon=True, loc="upper right")
+        ax[1].legend(frameon=True, loc="lower left")
         cbar = plt.colorbar(im, ax=ax)
         cbar.set_label("Contained PSF Flux [counts]")
 
@@ -302,7 +302,7 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
             dm_type,
         )
 
-        plt.savefig(fig_name, format="png")
+        plt.savefig(fig_name, format="png", bbox_inches="tight")
         plt.clf()
 
     return source_radius_limit
@@ -409,7 +409,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius):
             args.channel,
         )
 
-        plt.savefig(fig_name, format="png")
+        plt.savefig(fig_name, format="png", bbox_inches="tight")
         plt.clf()
 
     return mean_model
@@ -493,7 +493,7 @@ def run_code(Q=5, CH=1):
         ax[1].set_xlabel("Row pixels")
         fig_name = "%s/data/ffi/%i/channel_%i_image_gaia_sources.png" % (path, Q, CH)
 
-        plt.savefig(fig_name, format="png")
+        plt.savefig(fig_name, format="png", bbox_inches="tight")
         plt.clf()
 
     if remove_sat:
@@ -526,7 +526,7 @@ def run_code(Q=5, CH=1):
 
             fig_name = "%s/data/ffi/%i/channel_%i_gaia_flux_dist.png" % (path, Q, CH)
 
-            plt.savefig(fig_name, format="png")
+            plt.savefig(fig_name, format="png", bbox_inches="tight")
             plt.clf()
 
     # create dx, dy, gf, r, phi, vectors

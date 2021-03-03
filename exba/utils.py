@@ -5,7 +5,7 @@ import functools
 
 from scipy import sparse
 from patsy import dmatrix
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import pyia
 import matplotlib.pyplot as plt
 
