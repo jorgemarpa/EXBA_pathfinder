@@ -10,8 +10,7 @@ import pickle
 path = os.path.dirname(os.getcwd())
 
 sys.path.append(path)
-#from exba import EXBA
-from exba.exba_tools_new_ap import EXBA
+from exba import EXBA
 
 parser = argparse.ArgumentParser(description="AutoEncoder")
 parser.add_argument(
@@ -51,6 +50,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+
 def run_code(Q, CH):
     exba = EXBA(channel=CH, quarter=Q)
     exba._build_psf_model(plot=args.plot, load=True, show=False, fine=True)
@@ -67,7 +67,8 @@ def run_code(Q, CH):
 
     return
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     print("Running EXBA tools for Q: %i Ch: %i" % (args.quarter, args.channel))
     if args.dry_run:
         print("Dry run mode, exiting...")

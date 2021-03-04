@@ -98,7 +98,7 @@ class EXBA(object):
             self.ra, self.dec, self.unw, self.time[0], magnitude_limit=20
         )
         sources["col"], sources["row"] = tpfs[0].wcs.wcs_world2pix(
-            sources.ra, sources.dec, 0.5
+            sources.ra, sources.dec, 0.0
         )
         sources["col"] += tpfs[0].column
         sources["row"] += tpfs[0].row
@@ -118,6 +118,9 @@ class EXBA(object):
                 for idx in range(len(self.sources))
             ]
         ).transpose([1, 0, 2])
+
+        self.r = np.hypot(self.dx, self.dy)
+        self.phi = np.arctan2(self.dy, self.dx)
 
     def __repr__(self):
         q_result = ",".join([str(k) for k in list([self.quarter])])
@@ -290,6 +293,211 @@ class EXBA(object):
 
         return sources, removed_sources
 
+    def metrics(self):
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+        # count total pixels per source in aperture_mask
+        N_pix = np.array(self.aperture_mask.sum(axis=1)).ravel()
+
+        # compute PSF models for all sources alone
+        if not hasattr(self, "psf_models"):
+            raise AttributeError("No PSF models computed, run _build_psf_model() first")
+        # mean_model.sum(axis=0) gives a model of the image from PSF model
+        # if I divide each pixel value from the each source PSF models alone by the
+        # image models I'll get the contribution of that source to the total in that
+        # pixel
+        # apply aperture mask to PSF models, then sum aperture contribution and divide
+        # by the total pixels to get the % of flux from that source.
+        self.CROWDSAP = (
+            self.psf_models.multiply(1 / self.psf_models.sum(axis=0))
+            .multiply(self.aperture_mask.astype(float))
+            .toarray()
+            .sum(axis=1)
+            / N_pix
+        )
+
+        FLFRCSAP = self.psf_models.multiply(self.aperture_mask.astype(float)).sum(
+            axis=1
+        ) / self.psf_models.sum(axis=1)
+        self.FLFRCSAP = np.array(FLFRCSAP).ravel()
+
+        return
+
+    def find_aperture(
+        self, source_idx, target_completeness=0.9, target_crowd=0.9, plot=True
+    ):
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+        if not hasattr(self, "psf_models"):
+            self._build_psf_model(plot=False, load=True, show=False, fine=True)
+
+        def compute_FLFRCSAP(psf_model, mask):
+            return psf_model[mask].sum() / psf_model.sum()
+
+        def compute_CROWDSAP(psf_models, mask, i):
+            ratio = (
+                psf_models.multiply(1 / psf_models.sum(axis=0)).tocsr()[i].toarray()[0]
+            )
+            return ratio[mask].sum() / mask.sum()
+
+        compl, crowd, cut = [], [], []
+        for p in range(0, 97, 2):
+            cut.append(p)
+            mask = (
+                self.psf_models[source_idx]
+                > np.percentile(self.psf_models[source_idx].data, p)
+            ).toarray()[0]
+            crowd.append(compute_CROWDSAP(self.psf_models, mask, source_idx))
+            compl.append(
+                compute_FLFRCSAP(self.psf_models[source_idx].toarray()[0], mask)
+            )
+        compl = np.array(compl)
+        crowd = np.array(crowd)
+        cut = np.array(cut)
+
+        target_mask = (compl > target_completeness) & (crowd > target_crowd)
+        try:
+            pos = np.argmax(crowd[target_mask])
+            p_optim = cut[pos]
+            crowd_optim = crowd[pos]
+            compl_optim = compl[pos]
+        except ValueError:
+            pos = np.argmax(crowd)
+            p_optim = cut[pos]
+            crowd_optim = crowd[pos]
+            compl_optim = compl[pos]
+        val_optim = np.percentile(self.psf_models[source_idx].data, p_optim)
+
+        if plot:
+            plt.plot(cut, compl, label=r"FLFRCSAP      %.3f" % (compl_optim))
+            plt.plot(cut, crowd, label=r"CROWDSAP   %.3f" % (crowd_optim))
+            plt.axvline(p_optim, label=r"Optimal %%     %i" % (p_optim), c="r")
+            plt.xlabel("Percentile")
+            plt.ylabel("Metric")
+            plt.legend()
+            plt.show()
+
+        if not hasattr(self, "aperture_mask"):
+            self.aperture_mask = sparse.csr_matrix(np.zeros_like(self.dx).astype(bool))
+        self.aperture_mask[source_idx] = (
+            self.psf_models[source_idx]
+            > np.percentile(self.psf_models[source_idx].data, p_optim)
+        ).toarray()[0]
+        if isinstance(self.aperture_mask, sparse.csr_matrix):
+            self.aperture_mask.eliminate_zeros()
+            return self.aperture_mask[source_idx].toarray()[0]
+        else:
+            return self.aperture_mask[source_idx]
+
+    def find_all_apertures(self, plot=True):
+        for s in range(len(self.sources)):
+            mask = self.find_aperture(s, plot=plot)
+
+            if plot:
+                fig, ax = plt.subplots(1, 3, figsize=(9, 3))
+                ax[0].scatter(
+                    self.dx[s],
+                    self.dy[s],
+                    c=self.flux[0],
+                    marker="s",
+                    s=730,
+                    norm=colors.SymLogNorm(linthresh=50, vmin=3, vmax=5000, base=10),
+                )
+                ax[0].set_xlim(-5, 5)
+                ax[0].set_ylim(-5, 5)
+                ax[0].set_xlabel("dx [pix]")
+                ax[0].set_ylabel("dy [pix]")
+                ax[0].set_title("Data (%i)" % (s))
+                ax[0].set_aspect("equal", adjustable="box")
+                ax[0].scatter(
+                    self.dx[s, mask] - 0.5,
+                    self.dy[s, mask] - 0.5,
+                    marker="x",
+                    s=20,
+                    c="r",
+                )
+
+                ax[1].scatter(
+                    self.dx[s],
+                    self.dy[s],
+                    c=self.psf_models[s].toarray()[0],
+                    marker="s",
+                    s=730,
+                )
+                ax[1].set_xlim(-5, 5)
+                ax[1].set_ylim(-5, 5)
+                ax[1].set_xlabel("dx [pix]")
+                ax[1].set_title("PSF Model (normalize)")
+                ax[1].set_aspect("equal", adjustable="box")
+
+                ax[1].scatter(
+                    self.dx[s, mask] - 0.5,
+                    self.dy[s, mask] - 0.5,
+                    marker="x",
+                    s=20,
+                    c="r",
+                )
+
+                ax[2].scatter(
+                    self.dx_fine[s],
+                    self.dy_fine[s],
+                    c=self.psf_models_fine[s].toarray()[0],
+                    marker="s",
+                    s=730,
+                )
+                ax[2].set_xlim(-5, 5)
+                ax[2].set_ylim(-5, 5)
+                ax[2].set_xlabel("dx [pix]")
+                ax[2].set_title("PSF Model (fine grid)")
+                ax[2].set_aspect("equal", adjustable="box")
+
+                plt.show()
+
+        if isinstance(self.aperture_mask, sparse.csr_matrix):
+            self.aperture_mask = self.aperture_mask.toarray()
+        self.aperture_mask_2d = self.aperture_mask.reshape(
+            self.sources.shape[0], self.flux_2d.shape[1], self.flux_2d.shape[2]
+        )
+
+    def do_photometry(self):
+
+        if not hasattr(self, "aperture_mask"):
+            raise AttributeError("No computed aperture musk. Run `.find_aperture()`")
+
+        sap = np.zeros((self.sources.shape[0], self.flux.shape[0]))
+        sap_e = np.zeros((self.sources.shape[0], self.flux.shape[0]))
+
+        for tdx in tqdm(range(len(self.flux)), desc="Simple SAP flux", leave=False):
+            sap[:, tdx] = [
+                self.flux[tdx][mask].value.sum() for mask in self.aperture_mask
+            ]
+            sap_e[:, tdx] = [
+                np.power(self.flux_err[tdx][mask].value, 2).sum() ** 0.5
+                for mask in self.aperture_mask
+            ]
+
+        self.sap_lcs = lk.LightCurveCollection(
+            [
+                lk.KeplerLightCurve(
+                    time=self.time,
+                    cadenceno=self.cadences,
+                    flux=sap[i],
+                    flux_err=sap_e[i],
+                    time_format="bkjd",
+                    flux_unit="electron/s",
+                    targetid=self.sources.designation[i],
+                    label=self.sources.designation[i],
+                    mission="Kepler",
+                    quarter=int(self.quarter),
+                    channel=int(self.channel),
+                    ra=self.sources.ra[i],
+                    dec=self.sources.dec[i],
+                )
+                for i in range(len(sap))
+            ]
+        )
+        return
+
     def _find_psf_edge(
         self, radius_limit=6, cut=300, dm_type="cubic", plot=True, load=True, show=False
     ):
@@ -398,190 +606,32 @@ class EXBA(object):
 
         return source_radius_limit
 
-    def find_aperture(
-        self, space="pix-sq", plot=True, cut=150, remove_blank=True, show=False
+    def _build_psf_model(
+        self, radius_limit=6, plot=True, load=True, show=False, fine=True
     ):
-        if space == "world":
-            aper = (u.arcsecond * 2 * 4).to(u.deg).value  # aperture radii in deg
-            aperture_mask = [
-                np.hypot(self.ra - s.ra, self.dec - s.dec) < aper
-                for _, s in self.sources.iterrows()
-            ]
-        elif space == "pix-cir":
-            aper = 1.7
-            aperture_mask = [
-                np.hypot(self.col - s.col, self.row - s.row) < aper
-                for _, s in self.sources.iterrows()
-            ]
-        elif space == "pix-sq":
-            aper = [1.5, 1.5]
-            aperture_mask = [
-                (np.abs(self.col - np.floor(s.col)) < aper[1])
-                & (np.abs(self.row - np.floor(s.row)) < aper[0])
-                for _, s in self.sources.iterrows()
-            ]
-        elif space == "pix-auto":
-            # print("Computing PSF edges...")
-            self.radius = self._find_psf_edge(
-                radius_limit=6,
-                cut=cut,
-                plot=plot,
-                load=True,
-                dm_type="cubic",
-                show=show,
-            )
-            # create circular aperture mask using PSF edges
-            aperture_mask = [
-                np.hypot(self.col - s.col, self.row - s.row) <= r
-                for r, (_, s) in zip(self.radius, self.sources.iterrows())
-            ]
-            # create a background mask
-            bkg_mask = np.asarray(aperture_mask).sum(axis=0) == 0
-            self.bkg_mask = bkg_mask.reshape(self.col_2d.shape)
-            # compute a SNR image
-            mean_flux = self.flux.value.mean(axis=0)
-            bkg_std = sigma_clip(
-                mean_flux[bkg_mask],
-                sigma=3,
-                maxiters=5,
-                cenfunc=np.median,
-                masked=False,
-                copy=False,
-            ).std()
-            snr_img = np.abs(mean_flux / bkg_std)
-            self.snr_img = snr_img.reshape(self.col_2d.shape)
-            # combine circular aperture with SNR > 5 mask
-            aperture_mask &= snr_img > 3
-
-            if plot:
-                fig, ax = plt.subplots(figsize=(9, 7))
-                ax.set_title(
-                    "Background Mask mean = %.3f std = %.3f"
-                    % (mean_flux[bkg_mask].mean(), bkg_std)
-                )
-                pc = ax.pcolor(
-                    self.flux_2d[0],
-                    shading="auto",
-                    norm=colors.SymLogNorm(linthresh=50, vmin=3, vmax=5000, base=10),
-                )
-                ax.set_aspect("equal", adjustable="box")
-                ax.scatter(
-                    self.sources.col - self.col.min() + 0.5,
-                    self.sources.row - self.row.min() + 0.5,
-                    s=25,
-                    facecolors="c",
-                    marker="o",
-                    edgecolors="r",
-                )
-
-                for i in range(self.ra_2d.shape[0]):
-                    for j in range(self.ra_2d.shape[1]):
-                        if self.bkg_mask[i, j]:
-                            rect = patches.Rectangle(
-                                xy=(j, i),
-                                width=1,
-                                height=1,
-                                color="red",
-                                fill=False,
-                                hatch="",
-                                alpha=0.2,
-                            )
-                            ax.add_patch(rect)
-                fig_name = "%s/data/EXBA/%i/%i/bkg_mask.png" % (
-                    main_path,
-                    self.channel,
-                    self.quarter,
-                )
-                if show:
-                    plt.show()
-                else:
-                    plt.savefig(fig_name, format="png", bbox_inches="tight")
-                    plt.clf()
-
-        aperture_mask = np.asarray(aperture_mask)
-        aperture_mask_2d = aperture_mask.reshape(
-            self.sources.shape[0], self.flux_2d.shape[1], self.flux_2d.shape[2]
-        )
-        # clean aperture mask, remove isolated Pixels
-        self.aperture_mask_2d = clean_aperture_mask(aperture_mask_2d)
-        self.aperture_mask = aperture_mask_2d.reshape(aperture_mask.shape)
-
-        # remove zero apertures, if any
-        if remove_blank:
-            zero_mask = np.all((aperture_mask == 0), axis=1)
-            self.aperture_mask = aperture_mask[~zero_mask]
-            self.aperture_mask_2d = aperture_mask_2d[~zero_mask]
-
-            # remove sources with no aperture from variables
-            self.gf = self.gf[~zero_mask]
-            self.dx = self.dx[~zero_mask]
-            self.dy = self.dy[~zero_mask]
-            self.radius = self.radius[~zero_mask]
-            self.bad_sources = pd.concat(
-                [self.bad_sources, self.sources[zero_mask]]
-            ).reset_index(drop=True)
-            self.sources = self.sources[~zero_mask].reset_index(drop=True)
-
-        return
-
-    def do_photometry(self):
-
-        if not hasattr(self, "aperture_mask"):
-            raise AttributeError("No computed aperture musk. Run `.find_aperture()`")
-
-        sap = np.zeros((self.sources.shape[0], self.flux.shape[0]))
-        sap_e = np.zeros((self.sources.shape[0], self.flux.shape[0]))
-
-        for tdx in tqdm(range(len(self.flux)), desc="Simple SAP flux", leave=False):
-            sap[:, tdx] = [
-                self.flux[tdx][mask].value.sum() for mask in self.aperture_mask
-            ]
-            sap_e[:, tdx] = [
-                np.power(self.flux_err[tdx][mask].value, 2).sum() ** 0.5
-                for mask in self.aperture_mask
-            ]
-
-        self.sap_lcs = lk.LightCurveCollection(
-            [
-                lk.KeplerLightCurve(
-                    time=self.time,
-                    cadenceno=self.cadences,
-                    flux=sap[i],
-                    flux_err=sap_e[i],
-                    time_format="bkjd",
-                    flux_unit="electron/s",
-                    targetid=self.sources.designation[i],
-                    label=self.sources.designation[i],
-                    mission="Kepler",
-                    quarter=int(self.quarter),
-                    channel=int(self.channel),
-                    ra=self.sources.ra[i],
-                    dec=self.sources.dec[i],
-                )
-                for i in range(len(sap))
-            ]
-        )
-        return
-
-    def _build_psf_model(self, plot=True, load=True, show=False):
         warnings.filterwarnings("ignore", category=sparse.SparseEfficiencyWarning)
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
 
         r = np.hypot(self.dx, self.dy)
         phi = np.arctan2(self.dy, self.dx)
         mean_flux = np.nanmean(self.flux, axis=0).value
         # assign the flux estimations to be used for mean flux normalization
-        flux_estimates = self.gf
-        radius = self._find_psf_edge(
-            radius_limit=6, cut=50, plot=False, load=load, dm_type="cubic"
+        radius = (
+            self._find_psf_edge(
+                radius_limit=radius_limit,
+                cut=50,
+                plot=False,
+                load=load,
+                dm_type="cubic",
+            )
+            * 1.5
         )
         source_mask = sparse.csr_matrix(r < radius[:, None])
+        # source_mask = source_mask.multiply(source_mask.sum(axis=0) == 1)
 
         # mean flux values using uncontaminated mask and normalized by flux estimations
         mean_f = np.log10(
-            source_mask.astype(float)
-            .multiply(mean_flux)
-            .multiply(1 / flux_estimates)
-            .data
+            source_mask.astype(float).multiply(mean_flux).multiply(1 / self.gf).data
         )
         phi_b = source_mask.multiply(phi).data
         r_b = source_mask.multiply(r).data
@@ -613,38 +663,71 @@ class EXBA(object):
             )
 
         # We then build the same design matrix for all pixels with flux
-        Ap = make_A(
-            source_mask.multiply(phi).data,
-            source_mask.multiply(r).data,
-        )
+        Ap = make_A(phi_b, r_b)
 
         # And create a `mean_model` that has the psf model for all pixels with fluxes
         mean_model = sparse.csr_matrix(r.shape)
         m = 10 ** Ap.dot(psf_w)
         mean_model[source_mask] = m
         mean_model.eliminate_zeros()
-        self.mean_model = mean_model.multiply(1 / mean_model.sum(axis=1))
+        self.psf_models = mean_model.multiply(1 / mean_model.sum(axis=1)).tocsr()
+
+        # we create PSF models with fine grid
+        if fine:
+            col_fine, row_fine = np.meshgrid(
+                np.linspace(self.col.min(), self.col.max(), self.row_2d.shape[1] * 5),
+                np.linspace(self.row.min(), self.row.max(), self.row_2d.shape[0] * 5),
+            )
+            row_fine = row_fine.ravel()
+            col_fine = col_fine.ravel()
+
+            dx_fine, dy_fine = np.asarray(
+                [
+                    [
+                        col_fine - self.sources["col"][idx],
+                        row_fine - self.sources["row"][idx],
+                    ]
+                    for idx in range(len(self.sources))
+                ]
+            ).transpose([1, 0, 2])
+            self.dx_fine = dx_fine + 0.5
+            self.dy_fine = dy_fine + 0.5
+            r_fine = np.hypot(dx_fine, dy_fine)
+            phi_fine = np.arctan2(dy_fine, dx_fine)
+            source_mask_fine = sparse.csr_matrix(r_fine < radius[:, None])
+            phi_fine_b = source_mask_fine.multiply(phi_fine).data
+            r_fine_b = source_mask_fine.multiply(r_fine).data
+
+            Ap_fine = make_A(phi_fine_b, r_fine_b)
+
+            mean_model_fine = sparse.csr_matrix(r_fine.shape)
+            m_fine = 10 ** Ap_fine.dot(psf_w)
+            mean_model_fine[source_mask_fine] = m_fine
+            mean_model_fine.eliminate_zeros()
+            self.psf_models_fine = mean_model_fine.multiply(
+                1 / mean_model_fine.sum(axis=1)
+            ).tocsr()
 
         if plot:
             # Plotting r,phi,meanflux used to build PSF model
-            ylim = r_b.max() * 1.1
             vmin, vmax = np.nanmin(mean_f), np.nanmax(mean_f)
+            rlim = np.nanmax(r_b) * 1.1
             fig, ax = plt.subplots(1, 3, figsize=(15, 3))
             ax[0].set_title("Mean flux")
             cax = ax[0].scatter(
-                source_mask.multiply(phi).data,
-                source_mask.multiply(r).data,
+                phi_b,
+                r_b,
                 c=mean_f,
                 marker=".",
                 vmin=vmin,
                 vmax=vmax,
             )
-            ax[0].set_ylim(0, ylim)
+            ax[0].set_ylim(0, rlim)
             fig.colorbar(cax, ax=ax[0])
             ax[0].set_ylabel(r"$r$ [pixels]")
             ax[0].set_xlabel(r"$\phi$ [rad]")
 
-            ax[1].set_title("Average PSF Model")
+            ax[1].set_title("Average PSF Model %s" % ("FFI" if load else ""))
             cax = cax = ax[1].scatter(
                 source_mask.multiply(phi).data,
                 source_mask.multiply(r).data,
@@ -654,12 +737,12 @@ class EXBA(object):
                 vmax=vmax,
             )
             fig.colorbar(cax, ax=ax[1])
-            ax[1].set_ylim(0, ylim)
+            ax[1].set_ylim(0, rlim)
             ax[1].set_xlabel(r"$\phi$ [rad]")
 
-            ax[2].set_title("Average PSF Model (grid)")
+            ax[2].set_title("Average PSF Model %s (grid)" % ("FFI" if load else ""))
             r_test, phi_test = np.meshgrid(
-                np.linspace(0 ** 0.5, ylim ** 0.5, 100) ** 2,
+                np.linspace(0 ** 0.5, rlim ** 0.5, 100) ** 2,
                 np.linspace(-np.pi + 1e-5, np.pi - 1e-5, 100),
             )
             A_test = make_A(phi_test.ravel(), r_test.ravel())
@@ -670,108 +753,6 @@ class EXBA(object):
             ax[2].set_xlabel(r"$\phi$ [rad]")
 
             fig_name = "%s/data/EXBA/%i/%i/psf_model.png" % (
-                main_path,
-                self.channel,
-                self.quarter,
-            )
-            if show:
-                plt.show()
-            else:
-                plt.savefig(fig_name, format="png", bbox_inches="tight")
-                plt.clf()
-
-        return
-
-    def contamination_metrics(self, plot=False):
-        warnings.filterwarnings("ignore", category=RuntimeWarning)
-
-        # count total pixels per source in aperture_mask
-        N_pix = self.aperture_mask.sum(axis=1)
-        pix_w_signal = self.aperture_mask.sum(axis=0)
-        conta_pix_ratio = []
-        # contaminated pixels
-        for s in range(len(self.sources)):
-            sources_per_pix = pix_w_signal[self.aperture_mask[s]]
-            conta_pix_ratio.append((sources_per_pix > 1).sum() / N_pix[s])
-        self.FRCPIXSAP = 1 - np.array(conta_pix_ratio)
-
-        # compute PSF models for all sources alone
-        self._build_psf_model(plot=plot, load=True)
-        # mean_model.sum(axis=0) gives a model of the image from PSF model
-        # if I divide each pixel value from the each source PSF models alone by the
-        # image models I'll get the contribution of that source to the total in that
-        # pixel
-        # apply aperture mask to PSF models, then sum aperture contribution and divide
-        # by the total pixels to get the % of flux from that source.
-        self.CROWDSAP = (
-            self.mean_model.multiply(1 / self.mean_model.sum(axis=0))
-            .multiply(self.aperture_mask.astype(float))
-            .toarray()
-            .sum(axis=1)
-            / N_pix
-        )
-
-        FLFRCSAP = self.mean_model.multiply(self.aperture_mask.astype(float)).sum(
-            axis=1
-        ) / self.mean_model.sum(axis=1)
-        self.FLFRCSAP = np.array(FLFRCSAP).ravel()
-
-        return
-
-    def optimize_aperture(self, plot=True, show=False):
-
-        cuts = np.arange(50, 300, 10)
-        radius, complet, crowd = [], [], []
-        for i, cut in enumerate(cuts):
-            self.find_aperture(
-                space="pix-auto", plot=False, cut=cut, remove_blank=False
-            )
-            radius.append(self.radius)
-            self.contamination_metrics(plot=False)
-            complet.append(self.FLFRCSAP)
-            crowd.append(self.CROWDSAP)
-        radius = np.array(radius)
-        complet = np.array(complet)
-        crowd = np.array(crowd)
-        median_complet = np.nanmedian(complet, axis=1)
-        median_crowd = np.nanmean(crowd, axis=1)
-
-        try:
-            compl_above = median_complet >= 0.90
-            optim_cut = cuts[np.argmax(median_crowd[compl_above])]
-        except (IndexError, ValueError):
-            optim_cut = cuts[np.argmax(median_crowd)]
-            if not np.isfinite(optim_cut):
-                optim_cut = 150
-        self.optim_cut = optim_cut
-
-        if plot:
-            fig, ax = plt.subplots(1, 3, figsize=(15, 4))
-
-            for s in range(0, self.sources.shape[0]):
-                ax[0].plot(cuts, radius[:, s], alpha=0.4)
-                ax[1].plot(cuts, complet[:, s], alpha=0.4)
-                ax[2].plot(cuts, crowd[:, s], alpha=0.4)
-
-            ax[0].plot(cuts, np.nanmedian(radius, axis=1), alpha=1, label="Mean", c="k")
-            ax[1].plot(cuts, median_complet, alpha=1, label="Mean", c="k")
-            ax[2].plot(cuts, median_crowd, alpha=1, label="Mean", c="k")
-
-            ax[0].axvline(optim_cut, c="tab:red", ls="--", label="%i" % (optim_cut))
-            ax[1].axvline(optim_cut, c="tab:red", ls="--", label="%i" % (optim_cut))
-            ax[2].axvline(optim_cut, c="tab:red", ls="--", label="%i" % (optim_cut))
-            ax[0].legend(loc="upper right")
-
-            ax[0].set_ylabel("Radius PSF edge [pix]")
-            ax[0].set_xlabel("Enclosed Flux Cut")
-
-            ax[1].set_ylabel("FLFRCSAP")
-            ax[1].set_xlabel("Enclosed Flux Cut")
-
-            ax[2].set_ylabel("CROWDSAP")
-            ax[2].set_xlabel("Enclosed Flux Cut")
-
-            fig_name = "%s/data/EXBA/%i/%i/aperture_optim.png" % (
                 main_path,
                 self.channel,
                 self.quarter,
@@ -997,27 +978,34 @@ class EXBA(object):
         plt.colorbar(pc, label=r"Flux ($e^{-}s^{-1}$)")
         ax.set_aspect("equal", adjustable="box")
 
-        for i in range(self.ra_2d.shape[0]):
-            for j in range(self.ra_2d.shape[1]):
-                if self.aperture_mask_2d[idx, i, j]:
-                    rect = patches.Rectangle(
-                        xy=(j, i),
-                        width=1,
-                        height=1,
-                        color="red",
-                        fill=False,
-                        hatch="",
-                    )
-                    ax.add_patch(rect)
-        zoom = np.argwhere(self.aperture_mask_2d[idx] == True)
-        ax.set_ylim(
-            np.maximum(0, zoom[0, 0] - 5),
-            np.minimum(zoom[-1, 0] + 5, self.ra_2d.shape[0]),
-        )
-        ax.set_xlim(
-            np.maximum(0, zoom[0, -1] - 5),
-            np.minimum(zoom[-1, -1] + 5, self.ra_2d.shape[1]),
-        )
+        if hasattr(self, "aperture_mask_2d"):
+            for i in range(self.ra_2d.shape[0]):
+                for j in range(self.ra_2d.shape[1]):
+                    if self.aperture_mask_2d[idx, i, j]:
+                        rect = patches.Rectangle(
+                            xy=(j, i),
+                            width=1,
+                            height=1,
+                            color="red",
+                            fill=False,
+                            hatch="",
+                        )
+                        ax.add_patch(rect)
+            zoom = np.argwhere(self.aperture_mask_2d[idx] == True)
+            ax.set_ylim(
+                np.maximum(0, zoom[0, 0] - 5),
+                np.minimum(zoom[-1, 0] + 5, self.ra_2d.shape[0]),
+            )
+            ax.set_xlim(
+                np.maximum(0, zoom[0, -1] - 5),
+                np.minimum(zoom[-1, -1] + 5, self.ra_2d.shape[1]),
+            )
+
+            ax.set_title(
+                "FLFRCSAP    %.2f\nCROWDSAP %.2f"
+                % (self.FLFRCSAP[idx], self.CROWDSAP[idx]),
+                bbox=dict(facecolor="white", alpha=1),
+            )
 
         return ax
 
