@@ -455,6 +455,10 @@ def run_code(Q=5, CH=1):
 
     # clean sources
     _sources = clean_source_list(_sources)
+    _sources.to_csv(
+        "%s/data/ffi/%i/channel_%i_gaia_xmatch_clean.csv"
+        % (path, args.quarter, args.channel)
+    )
 
     # remove useless Pixels
     _col_2d = col_2d[r_min:r_max, c_min:c_max] - c_min
@@ -476,21 +480,33 @@ def run_code(Q=5, CH=1):
     print("New shape is (ravel):", _col.shape)
 
     if args.plot:
-        fig, ax = plt.subplots(1, 2, figsize=(16, 8))
-        ax[0].pcolor(_flux_2d, vmin=0, vmax=1000)
-        ax[0].scatter(
-            _sources.col, _sources.row, edgecolor="red", facecolor="None", s=10
+        fig = plt.figure(figsize=(16, 8))
+        ax = plt.subplot(projection=wcs)
+        im = ax.imshow(
+            _flux_2d,
+            cmap=plt.cm.viridis,
+            origin="lower",
+            norm=colors.SymLogNorm(linthresh=20, vmin=0, vmax=2000, base=10),
         )
-        ax[1].pcolor(_flux_2d, vmin=0, vmax=1000)
-        ax[1].scatter(
-            _sources.col, _sources.row, edgecolor="red", facecolor="None", s=10
-        )
-        ax[1].set_xlim(500, 600)
-        ax[1].set_ylim(500, 600)
+        fig.colorbar(im, label=r"Flux ($e^{-}s^{-1}$)")
 
-        ax[0].set_ylabel("Row pixels")
-        ax[0].set_xlabel("Row pixels")
-        ax[1].set_xlabel("Row pixels")
+        plt.title("FFI Ch %i" % (CH))
+        ax.set_xlabel("RA [deg]")
+        ax.set_ylabel("Dec [deg]")
+        ax.grid(color="white", ls="solid")
+        ax.set_aspect("equal", adjustable="box")
+
+        ax.scatter(
+            _sources.ra,
+            _sources.dec,
+            facecolors="none",
+            edgecolors="r",
+            linewidths=1,
+            transform=ax.get_transform("icrs"),
+        )
+
+        ax.set_ylabel("Row pixels")
+        ax.set_xlabel("Column pixels")
         fig_name = "%s/data/ffi/%i/channel_%i_image_gaia_sources.png" % (path, Q, CH)
 
         plt.savefig(fig_name, format="png", bbox_inches="tight")

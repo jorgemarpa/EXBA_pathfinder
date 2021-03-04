@@ -293,7 +293,7 @@ class EXBA(object):
 
         return sources, removed_sources
 
-    def metrics(self, plot=False):
+    def metrics(self):
         warnings.filterwarnings("ignore", category=RuntimeWarning)
 
         # count total pixels per source in aperture_mask
@@ -301,7 +301,7 @@ class EXBA(object):
 
         # compute PSF models for all sources alone
         if not hasattr(self, "psf_models"):
-            self._build_psf_model(radius_limit=6, plot=plot, load=True)
+            raise AttributeError("No PSF models computed, run _build_psf_model() first")
         # mean_model.sum(axis=0) gives a model of the image from PSF model
         # if I divide each pixel value from the each source PSF models alone by the
         # image models I'll get the contribution of that source to the total in that
@@ -407,7 +407,7 @@ class EXBA(object):
                 ax[0].set_ylim(-5, 5)
                 ax[0].set_xlabel("dx [pix]")
                 ax[0].set_ylabel("dy [pix]")
-                ax[0].set_title("Data")
+                ax[0].set_title("Data (%i)" % (s))
                 ax[0].set_aspect("equal", adjustable="box")
                 ax[0].scatter(
                     self.dx[s, mask] - 0.5,
@@ -610,6 +610,7 @@ class EXBA(object):
         self, radius_limit=6, plot=True, load=True, show=False, fine=True
     ):
         warnings.filterwarnings("ignore", category=sparse.SparseEfficiencyWarning)
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
 
         r = np.hypot(self.dx, self.dy)
         phi = np.arctan2(self.dy, self.dx)

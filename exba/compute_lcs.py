@@ -10,7 +10,8 @@ import pickle
 path = os.path.dirname(os.getcwd())
 
 sys.path.append(path)
-from exba import EXBA
+#from exba import EXBA
+from exba.exba_tools_new_ap import EXBA
 
 parser = argparse.ArgumentParser(description="AutoEncoder")
 parser.add_argument(
@@ -52,10 +53,9 @@ args = parser.parse_args()
 
 def run_code(Q, CH):
     exba = EXBA(channel=CH, quarter=Q)
-    exba.optimize_aperture(plot=args.plot)
-    exba.find_aperture(space='pix-auto', cut=exba.optim_cut,
-                       plot=args.plot, remove_blank=True)
-    exba.contamination_metrics(plot=args.plot)
+    exba._build_psf_model(plot=args.plot, load=True, show=False, fine=True)
+    exba.find_all_apertures(plot=False)
+    exba.metrics()
     exba.do_photometry()
     exba.apply_flatten()
     exba.apply_CBV(plot=False)
