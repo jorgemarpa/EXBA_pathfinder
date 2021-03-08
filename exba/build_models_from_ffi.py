@@ -627,11 +627,16 @@ def run_code(Q=5, CH=1):
 
     # convertion to polar coordinates
     print("to polar coordinates...")
-    r = sparse_mask.copy().astype(float)
-    phi = sparse_mask.copy().astype(float)
-    for row in range(sparse_mask.shape[0]):
-        r[row].data = np.hypot(dx[row].data, dy[row].data)
-        phi[row].data = np.arctan2(dy[row].data, dx[row].data)
+    nnz_inds = sparse_mask.nonzero()
+    r_vals = np.hypot(dx.data, dy.data)
+    phi_vals = np.arctan2(dy.data, dx.data)
+
+    r = sparse.csr_matrix(
+        (r_vals, (nnz_inds[0], nnz_inds[1])), shape=sparse_mask.shape, dtype=float
+    )
+    phi = sparse.csr_matrix(
+        (phi_vals, (nnz_inds[0], nnz_inds[1])), shape=sparse_mask.shape, dtype=float
+    )
 
     print("dx", dx.shape)
     print("dy", dy.shape)
