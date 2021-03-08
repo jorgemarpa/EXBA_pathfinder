@@ -87,31 +87,6 @@ WHERE phot_g_mean_mag<={magnitude_limit}
     return gd.data.to_pandas()
 
 
-def _make_A(phi, r, cut_r=5):
-    """ Make spline design matrix in polar coordinates """
-    phi_spline = sparse.csr_matrix(wrapped_spline(phi, order=3, nknots=6).T)
-    r_knots = np.linspace(0.25 ** 0.5, 5 ** 0.5, 8) ** 2
-    r_spline = sparse.csr_matrix(
-        np.asarray(
-            dmatrix(
-                "bs(x, knots=knots, degree=3, include_intercept=True)",
-                {"x": list(r), "knots": r_knots},
-            )
-        )
-    )
-    X = sparse.hstack(
-        [phi_spline.multiply(r_spline[:, idx]) for idx in range(r_spline.shape[1])],
-        format="csr",
-    )
-    cut = np.arange(phi_spline.shape[1] * 1, phi_spline.shape[1] * cut_r)
-    a = list(set(np.arange(X.shape[1])) - set(cut))
-    X1 = sparse.hstack(
-        [X[:, a], r_spline[:, 1:cut_r], sparse.csr_matrix(np.ones(X.shape[0])).T],
-        format="csr",
-    )
-    return X1
-
-
 def make_A_edges(r, f, type="cuadratic"):
     if type == "linear":
         A = np.vstack([r ** 0, r, f]).T
@@ -383,10 +358,10 @@ def clean_aperture_mask(mask):
 
 def make_A(phi, r, cut_r=5):
     """ Make spline design matrix in polar coordinates """
-    phi_spline = sparse.csr_matrix(wrapped_spline(phi, order=3, nknots=6).T)
+    phi_spline = sparse.csr_matrix(wrapped_spline(phi, order=3, nknots=12).T)
     low_knot = np.percentile(r, 3)
     upp_knot = np.percentile(r, 90)
-    r_knots = np.linspace(low_knot ** 0.5, upp_knot ** 0.5, 8) ** 2
+    r_knots = np.linspace(low_knot ** 0.5, upp_knot ** 0.5, 10) ** 2
     r_spline = sparse.csr_matrix(
         np.asarray(
             dmatrix(
