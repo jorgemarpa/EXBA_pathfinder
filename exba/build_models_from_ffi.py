@@ -205,7 +205,7 @@ def _saturated_pixels_mask(flux, column, row, saturation_limit=1.5e5):
 def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"):
 
     temp_mask = sparse.csr_matrix(r < radius_limit)
-    temp_mask = temp_mask.multiply(temp_mask.sum(axis=0) == 1).tocsr()
+    # temp_mask = temp_mask.multiply(temp_mask.sum(axis=0) == 1).tocsr()
 
     with np.errstate(divide="ignore", invalid="ignore"):
         f = np.log10(temp_mask.astype(float).multiply(mean_flux).data)
@@ -244,7 +244,7 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
 
     ok = np.isfinite(l)
     polifit_results = np.polyfit(test_f[ok], l[ok], 2)
-    source_radius_limit = np.polyval(polifit_results, np.log10(gf[:, 0]))
+    source_radius_limit = np.polyval(polifit_results, np.log10(gf[:, 0].data))
     source_radius_limit[source_radius_limit > radius_limit] = radius_limit
     source_radius_limit[source_radius_limit < 0] = 0
 
