@@ -70,8 +70,8 @@ r_min, r_max = 20, 1044
 c_min, c_max = 12, 1112
 
 remove_sat = False
-sample_sources = False
-N_sample = 500
+sample_sources = True
+N_sample = 100
 
 
 def model_bkg(data, mask=None):
@@ -339,10 +339,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
     )
 
     # We then build the same design matrix for all pixels with flux
-    Ap = make_A(
-        source_mask.multiply(phi).data,
-        source_mask.multiply(r).data,
-    )
+    Ap = make_A(phi_b, r_b)
 
     # And create a `mean_model` that has the psf model for all pixels with fluxes
     mean_model = sparse.csr_matrix(r.shape)
@@ -369,8 +366,8 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
         fig, ax = plt.subplots(2, 3, figsize=(16, 8))
         ax[0, 0].set_title("Mean flux")
         cax = ax[0, 0].scatter(
-            source_mask.multiply(phi).data,
-            source_mask.multiply(r).data,
+            phi_b,
+            r_b,
             c=mean_f,
             marker=".",
             vmin=vmin,
@@ -610,7 +607,7 @@ def run_code(Q=5, CH=1):
     # create dx, dy, gf, r, phi, vectors
     # gaia estimate flux values per pixel to be used as flux priors
     print("Computing dx, dy, gf...")
-    dx, dy, gf, dflux = [], [], [], []
+    dx, dy, gf, dflux, sparse_mask = [], [], [], [], []
     for i in tqdm(range(len(_sources)), desc="Gaia sources"):
         dx_aux = _col - _sources["col"].iloc[i]
         dy_aux = _row - _sources["row"].iloc[i]
@@ -618,22 +615,30 @@ def run_code(Q=5, CH=1):
 
         dx.append(near_mask.multiply(dx_aux))
         dy.append(near_mask.multiply(dy_aux))
-        gf.append(near_mask.multiply(_sources["phot_g_mean_flux"].iloc[i]).data)
-        dflux.append(near_mask.multiply(_flux).data)
+        sparse_mask.append(near_mask)
 
     del dx_aux, dy_aux
     dx = sparse.vstack(dx, "csr")
     dy = sparse.vstack(dy, "csr")
-    gf = np.array(gf)
-    dflux = np.array(dflux)
+    sparse_mask = sparse.vstack(sparse_mask, "csr")
+
+    gf = sparse_mask.multiply(_sources["phot_g_mean_flux"].values[:, None]).tocsr()
+    dflux = sparse_mask.multiply(_flux).tocsr()
 
     # convertion to polar coordinates
     print("to polar coordinates...")
-    r = np.hypot(dx.data, dy.data).reshape(len(_sources), near_mask.sum())
-    phi = np.arctan2(dy.data, dx.data).reshape(len(_sources), near_mask.sum())
+    r = sparse_mask.copy().astype(float)
+    phi = sparse_mask.copy().astype(float)
+    for row in range(sparse_mask.shape[0]):
+        r[row].data = np.hypot(dx[row].data, dy[row].data)
+        phi[row].data = np.arctan2(dy[row].data, dx[row].data)
 
-    dx_ = dx.data.reshape(len(_sources), near_mask.sum())
-    dy_ = dy.data.reshape(len(_sources), near_mask.sum())
+    print("dx", dx.shape)
+    print("dy", dy.shape)
+    print("r", r.shape)
+    print("phi", phi.shape)
+    print("gf", gf.shape)
+    print("dflux", dflux.shape)
 
     # compute PSF edge model
     print("Computing PSF edges...")
@@ -641,7 +646,7 @@ def run_code(Q=5, CH=1):
 
     # compute PSF model
     print("Computing PSF model...")
-    psf_model = build_psf_model(r, phi, dflux, gf, radius * 2, dx_, dy_)
+    psf_model = build_psf_model(r, phi, dflux, gf, radius * 2, dx, dy)
 
 
 if __name__ == "__main__":
