@@ -341,7 +341,7 @@ class EXBA(object):
             return ratio[mask].sum() / mask.sum()
 
         compl, crowd, cut = [], [], []
-        for p in range(0, 97, 2):
+        for p in range(0, 99, 2):
             cut.append(p)
             mask = (
                 self.psf_models[source_idx]
@@ -403,8 +403,8 @@ class EXBA(object):
                     s=730,
                     norm=colors.SymLogNorm(linthresh=50, vmin=3, vmax=5000, base=10),
                 )
-                ax[0].set_xlim(-5, 5)
-                ax[0].set_ylim(-5, 5)
+                ax[0].set_xlim(-10, 10)
+                ax[0].set_ylim(-10, 10)
                 ax[0].set_xlabel("dx [pix]")
                 ax[0].set_ylabel("dy [pix]")
                 ax[0].set_title("Data (%i)" % (s))
@@ -638,7 +638,7 @@ class EXBA(object):
 
         model_path = "%s/data/ffi/%i/channel_%i_psf_model.pkl" % (
             main_path,
-            self.quarter,
+            self.quarter if self.quarter != 17 else 16,
             self.channel,
         )
         if load and os.path.isfile(model_path) and load:
@@ -664,6 +664,7 @@ class EXBA(object):
 
         # We then build the same design matrix for all pixels with flux
         Ap = make_A(phi_b, r_b)
+        print(Ap.shape)
 
         # And create a `mean_model` that has the psf model for all pixels with fluxes
         mean_model = sparse.csr_matrix(r.shape)
@@ -710,11 +711,12 @@ class EXBA(object):
 
         if plot:
             # Plotting r,phi,meanflux used to build PSF model
-            vmin, vmax = np.nanmin(mean_f), np.nanmax(mean_f)
+            vmin = np.nanpercentile(mean_f, 10)
+            vmax = np.nanpercentile(mean_f, 90)
             rlim = np.nanmax(r_b) * 1.1
-            fig, ax = plt.subplots(1, 3, figsize=(15, 3))
-            ax[0].set_title("Mean flux")
-            cax = ax[0].scatter(
+            fig, ax = plt.subplots(2, 3, figsize=(16, 8))
+            ax[0, 0].set_title("Mean flux")
+            cax = ax[0, 0].scatter(
                 phi_b,
                 r_b,
                 c=mean_f,
@@ -722,13 +724,13 @@ class EXBA(object):
                 vmin=vmin,
                 vmax=vmax,
             )
-            ax[0].set_ylim(0, rlim)
-            fig.colorbar(cax, ax=ax[0])
-            ax[0].set_ylabel(r"$r$ [pixels]")
-            ax[0].set_xlabel(r"$\phi$ [rad]")
+            ax[0, 0].set_ylim(0, rlim)
+            fig.colorbar(cax, ax=ax[0, 0])
+            ax[0, 0].set_ylabel(r"$r$ [pixels]")
+            ax[0, 0].set_xlabel(r"$\phi$ [rad]")
 
-            ax[1].set_title("Average PSF Model %s" % ("FFI" if load else ""))
-            cax = cax = ax[1].scatter(
+            ax[0, 1].set_title("Average PSF Model %s" % ("FFI" if load else ""))
+            cax = cax = ax[0, 1].scatter(
                 source_mask.multiply(phi).data,
                 source_mask.multiply(r).data,
                 c=np.log10(m),
@@ -736,11 +738,11 @@ class EXBA(object):
                 vmin=vmin,
                 vmax=vmax,
             )
-            fig.colorbar(cax, ax=ax[1])
-            ax[1].set_ylim(0, rlim)
-            ax[1].set_xlabel(r"$\phi$ [rad]")
+            fig.colorbar(cax, ax=ax[0, 1])
+            ax[0, 1].set_ylim(0, rlim)
+            ax[0, 1].set_xlabel(r"$\phi$ [rad]")
 
-            ax[2].set_title("Average PSF Model %s (grid)" % ("FFI" if load else ""))
+            ax[0, 2].set_title("Average PSF Model %s (grid)" % ("FFI" if load else ""))
             r_test, phi_test = np.meshgrid(
                 np.linspace(0 ** 0.5, rlim ** 0.5, 100) ** 2,
                 np.linspace(-np.pi + 1e-5, np.pi - 1e-5, 100),
@@ -748,9 +750,53 @@ class EXBA(object):
             A_test = make_A(phi_test.ravel(), r_test.ravel())
             model_test = A_test.dot(psf_w)
             model_test = model_test.reshape(phi_test.shape)
-            cax = ax[2].pcolormesh(phi_test, r_test, model_test, shading="auto")
-            fig.colorbar(cax, ax=ax[2])
-            ax[2].set_xlabel(r"$\phi$ [rad]")
+            cax = ax[0, 2].pcolormesh(
+                phi_test, r_test, model_test, shading="auto", vmin=vmin, vmax=vmax
+            )
+            fig.colorbar(cax, ax=ax[0, 2])
+            ax[0, 2].set_xlabel(r"$\phi$ [rad]")
+
+            dx_b = source_mask.multiply(self.dx).data
+            dy_b = source_mask.multiply(self.dy).data
+
+            ax[1, 0].set_title("Mean flux")
+            cax = ax[1, 0].scatter(
+                dx_b,
+                dy_b,
+                c=mean_f,
+                marker=".",
+                vmin=vmin,
+                vmax=vmax,
+            )
+            fig.colorbar(cax, ax=ax[1, 0])
+            ax[1, 0].set_ylabel("dy")
+            ax[1, 0].set_xlabel("dx")
+
+            ax[1, 1].set_title("Average PSF Model %s" % ("FFI" if load else ""))
+            cax = cax = ax[1, 1].scatter(
+                dx_b,
+                dy_b,
+                c=np.log10(m),
+                marker=".",
+                vmin=vmin,
+                vmax=vmax,
+            )
+            fig.colorbar(cax, ax=ax[1, 1])
+            ax[1, 1].set_xlabel("dx")
+
+            ax[1, 2].set_title("Average PSF Model %s (grid)" % ("FFI" if load else ""))
+            r_test, phi_test = np.meshgrid(
+                np.linspace(0 ** 0.5, rlim ** 0.5, 100) ** 2,
+                np.linspace(-np.pi + 1e-5, np.pi - 1e-5, 100),
+            )
+            A_test = make_A(phi_test.ravel(), r_test.ravel())
+            model_test = A_test.dot(psf_w)
+            model_test = model_test.reshape(phi_test.shape)
+            cax = ax[1, 2].pcolormesh(
+                phi_test, r_test, model_test, shading="auto", vmin=vmin, vmax=vmax
+            )
+            fig.colorbar(cax, ax=ax[1, 2])
+            ax[1, 2].set_xlabel(r"$\phi$ [rad]")
 
             fig_name = "%s/data/EXBA/%i/%i/psf_model.png" % (
                 main_path,

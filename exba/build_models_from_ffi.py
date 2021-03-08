@@ -205,7 +205,7 @@ def _saturated_pixels_mask(flux, column, row, saturation_limit=1.5e5):
 def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"):
 
     temp_mask = sparse.csr_matrix(r < radius_limit)
-    # temp_mask = temp_mask.multiply(temp_mask.sum(axis=0) == 1)
+    temp_mask = temp_mask.multiply(temp_mask.sum(axis=0) == 1).tocsr()
 
     with np.errstate(divide="ignore", invalid="ignore"):
         f = np.log10(temp_mask.astype(float).multiply(mean_flux).data)
@@ -308,12 +308,13 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
     return source_radius_limit
 
 
-def build_psf_model(r, phi, mean_flux, flux_estimates, radius):
+def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
     warnings.filterwarnings("ignore", category=sparse.SparseEfficiencyWarning)
     warnings.filterwarnings("ignore", category=RuntimeWarning)
 
     # assign the flux estimations to be used for mean flux normalization
     source_mask = sparse.csr_matrix(r < radius[:, None])
+    source_mask = source_mask.multiply(source_mask.sum(axis=0) == 1).tocsr()
 
     # mean flux values using uncontaminated mask and normalized by flux estimations
     mean_f = np.log10(
@@ -363,10 +364,11 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius):
     if args.plot:
         # Plotting r,phi,meanflux used to build PSF model
         ylim = r_b.max() * 1.1
-        vmin, vmax = mean_f[nan_mask].min(), mean_f[nan_mask].max()
-        fig, ax = plt.subplots(1, 3, figsize=(14, 3))
-        ax[0].set_title("Mean flux")
-        cax = ax[0].scatter(
+        vmin = np.percentile(mean_f[nan_mask], 98)
+        vmax = np.percentile(mean_f[nan_mask], 5)
+        fig, ax = plt.subplots(2, 3, figsize=(16, 8))
+        ax[0, 0].set_title("Mean flux")
+        cax = ax[0, 0].scatter(
             source_mask.multiply(phi).data,
             source_mask.multiply(r).data,
             c=mean_f,
@@ -374,34 +376,77 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius):
             vmin=vmin,
             vmax=vmax,
         )
-        ax[0].set_ylim(0, ylim)
-        fig.colorbar(cax, ax=ax[0])
-        ax[0].set_ylabel(r"$r$ [pixels]")
-        ax[0].set_xlabel(r"$\phi$ [rad]")
+        ax[0, 0].set_ylim(0, ylim)
+        fig.colorbar(cax, ax=ax[0, 0])
+        ax[0, 0].set_ylabel(r"$r$ [pixels]")
+        ax[0, 0].set_xlabel(r"$\phi$ [rad]")
 
-        ax[1].set_title("Average PSF Model")
-        cax = cax = ax[1].scatter(
-            source_mask.multiply(phi).data,
-            source_mask.multiply(r).data,
+        ax[0, 1].set_title("Average PSF Model")
+        cax = cax = ax[0, 1].scatter(
+            phi_b,
+            r_b,
             c=np.log10(m),
             marker=".",
             vmin=vmin,
             vmax=vmax,
         )
-        fig.colorbar(cax, ax=ax[1])
-        ax[1].set_xlabel(r"$\phi$ [rad]")
+        fig.colorbar(cax, ax=ax[0, 1])
+        ax[0, 1].set_xlabel(r"$\phi$ [rad]")
 
-        ax[2].set_title("Average PSF Model (grid)")
+        ax[0, 2].set_title("Average PSF Model (grid)")
         r_test, phi_test = np.meshgrid(
-            np.linspace(0 ** 0.5, ylim ** 0.5, 100) ** 2,
-            np.linspace(-np.pi + 1e-5, np.pi - 1e-5, 100),
+            np.linspace(0 ** 0.5, ylim ** 0.5, 500) ** 2,
+            np.linspace(-np.pi + 1e-5, np.pi - 1e-5, 500),
         )
         A_test = make_A(phi_test.ravel(), r_test.ravel())
         model_test = A_test.dot(psf_w)
         model_test = model_test.reshape(phi_test.shape)
-        cax = ax[2].pcolormesh(phi_test, r_test, model_test, shading="auto")
-        fig.colorbar(cax, ax=ax[2])
-        ax[2].set_xlabel(r"$\phi$ [rad]")
+        cax = ax[0, 2].pcolormesh(
+            phi_test,
+            r_test,
+            model_test,
+            shading="auto",
+            vmax=vmax,
+            vmin=vmin,
+        )
+        fig.colorbar(cax, ax=ax[0, 2])
+        ax[0, 2].set_xlabel(r"$\phi$ [rad]")
+
+        cax = ax[1, 0].scatter(
+            source_mask.multiply(dx).data,
+            source_mask.multiply(dy).data,
+            c=mean_f,
+            marker=".",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        fig.colorbar(cax, ax=ax[1, 0])
+        ax[1, 0].set_ylabel("dy")
+        ax[1, 0].set_xlabel("dx")
+
+        cax = cax = ax[1, 1].scatter(
+            source_mask.multiply(dx).data,
+            source_mask.multiply(dy).data,
+            c=np.log10(m),
+            marker=".",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        fig.colorbar(cax, ax=ax[1, 1])
+        ax[1, 1].set_xlabel("dx")
+
+        x_test = r_test * np.cos(phi_test)
+        y_test = r_test * np.sin(phi_test)
+        cax = ax[1, 2].pcolormesh(
+            x_test,
+            y_test,
+            model_test,
+            shading="auto",
+            vmax=vmax,
+            vmin=vmin,
+        )
+        fig.colorbar(cax, ax=ax[1, 2])
+        ax[1, 2].set_xlabel("dx")
 
         fig_name = "%s/data/ffi/%i/channel_%i_psf_model.png" % (
             path,
@@ -411,6 +456,23 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius):
 
         plt.savefig(fig_name, format="png", bbox_inches="tight")
         plt.clf()
+
+        to_save = dict(
+            x_test=x_test,
+            y_test=y_test,
+            model_test=model_test,
+            x_model=source_mask.multiply(dx).data,
+            y_model=source_mask.multiply(dy).data,
+            f_model=np.log10(m),
+            mean_f=mean_f,
+        )
+        output = "%s/data/ffi/%i/channel_%i_psf_model_grid.pkl" % (
+            path,
+            args.quarter,
+            args.channel,
+        )
+        with open(output, "wb") as file:
+            pickle.dump(to_save, file)
 
     return mean_model
 
@@ -570,13 +632,16 @@ def run_code(Q=5, CH=1):
     r = np.hypot(dx.data, dy.data).reshape(len(_sources), near_mask.sum())
     phi = np.arctan2(dy.data, dx.data).reshape(len(_sources), near_mask.sum())
 
+    dx_ = dx.data.reshape(len(_sources), near_mask.sum())
+    dy_ = dy.data.reshape(len(_sources), near_mask.sum())
+
     # compute PSF edge model
     print("Computing PSF edges...")
     radius = find_psf_edge(r, dflux, gf, radius_limit=6, cut=300, dm_type=args.dm_type)
 
     # compute PSF model
     print("Computing PSF model...")
-    psf_model = build_psf_model(r, phi, dflux, gf, radius * 2)
+    psf_model = build_psf_model(r, phi, dflux, gf, radius * 2, dx_, dy_)
 
 
 if __name__ == "__main__":
