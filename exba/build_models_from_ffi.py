@@ -70,8 +70,8 @@ r_min, r_max = 20, 1044
 c_min, c_max = 12, 1112
 
 remove_sat = False
-sample_sources = True
-N_sample = 100
+sample_sources = False
+N_sample = 5000
 
 
 def model_bkg(data, mask=None):
@@ -204,7 +204,15 @@ def _saturated_pixels_mask(flux, column, row, saturation_limit=1.5e5):
 
 def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"):
 
-    temp_mask = sparse.csr_matrix(r < radius_limit)
+    # temp_mask = sparse.csr_matrix(
+    #     ~sparse.csr_matrix(r >= radius_limit).toarray() & r.toarray().astype(bool)
+    # )
+    nonz_idx = r.nonzero()
+    rad_mask = r.data < radius_limit
+    temp_mask = sparse.csr_matrix(
+        (r.data[rad_mask], (nonz_idx[0][rad_mask], nonz_idx[1][rad_mask])),
+        shape=r.shape,
+    ).astype(bool)
     # temp_mask = temp_mask.multiply(temp_mask.sum(axis=0) == 1).tocsr()
 
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -212,7 +220,7 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
     k = np.isfinite(f)
     f_mask = f[k]
     r_mask = temp_mask.astype(float).multiply(r).data[k]
-    gf_mask = temp_mask.astype(float).multiply(gf).data[k]
+    gf_mask = temp_mask.astype(float).multiply(gf[:, None]).data[k]
     k = np.isfinite(f_mask)
 
     A = make_A_edges(r_mask, np.log10(gf_mask), type=dm_type)
@@ -244,7 +252,7 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
 
     ok = np.isfinite(l)
     polifit_results = np.polyfit(test_f[ok], l[ok], 2)
-    source_radius_limit = np.polyval(polifit_results, np.log10(gf[:, 0].data))
+    source_radius_limit = np.polyval(polifit_results, np.log10(gf))
     source_radius_limit[source_radius_limit > radius_limit] = radius_limit
     source_radius_limit[source_radius_limit < 0] = 0
 
@@ -313,12 +321,30 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
     warnings.filterwarnings("ignore", category=RuntimeWarning)
 
     # assign the flux estimations to be used for mean flux normalization
-    source_mask = sparse.csr_matrix(r < radius[:, None])
+    # source_mask = sparse.csr_matrix(r < radius[:, None])
+    # source_mask = sparse.csr_matrix(
+    #     ~sparse.csr_matrix(r >= radius[:, None]).toarray() & r.toarray().astype(bool)
+    # )
+    source_mask = []
+    for s in range(r.shape[0]):
+        nonz_idx = r[s].nonzero()
+        rad_mask = r[s].data < radius[s]
+        aux = sparse.csr_matrix(
+            (r[s].data[rad_mask], (nonz_idx[0][rad_mask], nonz_idx[1][rad_mask])),
+            shape=r[s].shape,
+        ).astype(bool)
+        source_mask.append(aux)
+    source_mask = sparse.vstack(source_mask, "csr")
+    print("# Contaminated pixels: ", (source_mask.sum(axis=0) > 1).sum())
     source_mask = source_mask.multiply(source_mask.sum(axis=0) == 1).tocsr()
+    source_mask.eliminate_zeros()
 
     # mean flux values using uncontaminated mask and normalized by flux estimations
     mean_f = np.log10(
-        source_mask.astype(float).multiply(mean_flux).multiply(1 / flux_estimates).data
+        source_mask.astype(float)
+        .multiply(mean_flux)
+        .multiply(1 / flux_estimates[:, None])
+        .data
     )
     phi_b = source_mask.multiply(phi).data
     r_b = source_mask.multiply(r).data
@@ -370,6 +396,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
             r_b,
             c=mean_f,
             marker=".",
+            s=2,
             vmin=vmin,
             vmax=vmax,
         )
@@ -384,6 +411,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
             r_b,
             c=np.log10(m),
             marker=".",
+            s=2,
             vmin=vmin,
             vmax=vmax,
         )
@@ -414,6 +442,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
             source_mask.multiply(dy).data,
             c=mean_f,
             marker=".",
+            s=2,
             vmin=vmin,
             vmax=vmax,
         )
@@ -426,6 +455,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
             source_mask.multiply(dy).data,
             c=np.log10(m),
             marker=".",
+            s=2,
             vmin=vmin,
             vmax=vmax,
         )
@@ -611,7 +641,7 @@ def run_code(Q=5, CH=1):
     for i in tqdm(range(len(_sources)), desc="Gaia sources"):
         dx_aux = _col - _sources["col"].iloc[i]
         dy_aux = _row - _sources["row"].iloc[i]
-        near_mask = sparse.csr_matrix((np.abs(dx_aux) <= 10) & (np.abs(dy_aux) <= 10))
+        near_mask = sparse.csr_matrix((np.abs(dx_aux) <= 7) & (np.abs(dy_aux) <= 7))
 
         dx.append(near_mask.multiply(dx_aux))
         dy.append(near_mask.multiply(dy_aux))
@@ -622,7 +652,7 @@ def run_code(Q=5, CH=1):
     dy = sparse.vstack(dy, "csr")
     sparse_mask = sparse.vstack(sparse_mask, "csr")
 
-    gf = sparse_mask.multiply(_sources["phot_g_mean_flux"].values[:, None]).tocsr()
+    gf = _sources["phot_g_mean_flux"].values
     dflux = sparse_mask.multiply(_flux).tocsr()
 
     # convertion to polar coordinates
@@ -637,13 +667,6 @@ def run_code(Q=5, CH=1):
     phi = sparse.csr_matrix(
         (phi_vals, (nnz_inds[0], nnz_inds[1])), shape=sparse_mask.shape, dtype=float
     )
-
-    print("dx", dx.shape)
-    print("dy", dy.shape)
-    print("r", r.shape)
-    print("phi", phi.shape)
-    print("gf", gf.shape)
-    print("dflux", dflux.shape)
 
     # compute PSF edge model
     print("Computing PSF edges...")
