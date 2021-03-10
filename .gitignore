@@ -9,3 +9,4 @@ exba/.python-version
 exba/__pycache__*
 exba/__pycache__/*
 notebooks/.ipynb_checkpoints
+notebooks/.jupyter_symlinks

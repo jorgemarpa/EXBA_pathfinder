@@ -69,7 +69,7 @@ args = parser.parse_args()
 r_min, r_max = 20, 1044
 c_min, c_max = 12, 1112
 
-remove_sat = False
+remove_sat = True
 sample_sources = False
 N_sample = 5000
 
@@ -204,15 +204,14 @@ def _saturated_pixels_mask(flux, column, row, saturation_limit=1.5e5):
 
 def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"):
 
-    # temp_mask = sparse.csr_matrix(
-    #     ~sparse.csr_matrix(r >= radius_limit).toarray() & r.toarray().astype(bool)
-    # )
+    # remove pixels with r > 6.
     nonz_idx = r.nonzero()
     rad_mask = r.data < radius_limit
     temp_mask = sparse.csr_matrix(
         (r.data[rad_mask], (nonz_idx[0][rad_mask], nonz_idx[1][rad_mask])),
         shape=r.shape,
     ).astype(bool)
+    temp_mask.eliminate_zeros()
     # temp_mask = temp_mask.multiply(temp_mask.sum(axis=0) == 1).tocsr()
 
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -256,7 +255,7 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
     source_radius_limit[source_radius_limit > radius_limit] = radius_limit
     source_radius_limit[source_radius_limit < 0] = 0
 
-    if args.save:
+    if False:
         to_save = dict(w=w, polifit_results=polifit_results)
         output = "%s/data/ffi/%i/channel_%i_psf_edge_model_%s.pkl" % (
             path,
@@ -303,7 +302,7 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
             ylabel=("Radius from Source [pix]"),
             xlabel=("log$_{10}$ Source Flux"),
         )
-        fig_name = "%s/data/ffi/%i/channel_%i_psf_edge_model_%s.png" % (
+        fig_name = "%s/figures/ffi/%i/channel_%i_psf_edge_model_%s.png" % (
             path,
             args.quarter,
             args.channel,
@@ -312,6 +311,7 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
 
         plt.savefig(fig_name, format="png", bbox_inches="tight")
         plt.clf()
+        plt.close()
 
     return source_radius_limit
 
@@ -320,11 +320,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
     warnings.filterwarnings("ignore", category=sparse.SparseEfficiencyWarning)
     warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-    # assign the flux estimations to be used for mean flux normalization
-    # source_mask = sparse.csr_matrix(r < radius[:, None])
-    # source_mask = sparse.csr_matrix(
-    #     ~sparse.csr_matrix(r >= radius[:, None]).toarray() & r.toarray().astype(bool)
-    # )
+    # remove pixels outside the radius limit and contaminated pixels
     source_mask = []
     for s in range(r.shape[0]):
         nonz_idx = r[s].nonzero()
@@ -356,26 +352,34 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
     nan_mask = np.isfinite(mean_f.ravel())
 
     # we solve for A * psf_w = mean_f
-    psf_w = solve_linear_model(
-        A,
-        mean_f.ravel(),
-        k=nan_mask,
-        prior_mu=prior_mu,
-        prior_sigma=prior_sigma,
-    )
-
-    # We then build the same design matrix for all pixels with flux
-    Ap = make_A(phi_b, r_b)
+    for count in [0, 1]:
+        psf_w = solve_linear_model(
+            A,
+            mean_f.ravel(),
+            k=nan_mask,
+            prior_mu=prior_mu,
+            prior_sigma=prior_sigma,
+        )
+        res = np.ma.masked_array(mean_f.ravel(), ~nan_mask) - A.dot(psf_w)
+        nan_mask &= ~sigma_clip(res, sigma=3).mask
 
     # And create a `mean_model` that has the psf model for all pixels with fluxes
     mean_model = sparse.csr_matrix(r.shape)
-    m = 10 ** Ap.dot(psf_w)
+    m = 10 ** A.dot(psf_w)
     mean_model[source_mask] = m
     mean_model.eliminate_zeros()
     mean_model = mean_model.multiply(1 / mean_model.sum(axis=1))
 
     if args.save:
-        to_save = dict(psf_w=psf_w)
+        to_save = dict(
+            A=A,
+            psf_w=psf_w,
+            x_model=source_mask.multiply(dx).data,
+            y_model=source_mask.multiply(dy).data,
+            f_model=np.log10(m),
+            mean_f=mean_f,
+            clip_mask=nan_mask,
+        )
         output = "%s/data/ffi/%i/channel_%i_psf_model.pkl" % (
             path,
             args.quarter,
@@ -389,12 +393,12 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
         ylim = r_b.max() * 1.1
         vmin = np.percentile(mean_f[nan_mask], 98)
         vmax = np.percentile(mean_f[nan_mask], 5)
-        fig, ax = plt.subplots(2, 3, figsize=(16, 8))
+        fig, ax = plt.subplots(2, 2, figsize=(11, 8))
         ax[0, 0].set_title("Mean flux")
         cax = ax[0, 0].scatter(
-            phi_b,
-            r_b,
-            c=mean_f,
+            phi_b[nan_mask],
+            r_b[nan_mask],
+            c=mean_f[nan_mask],
             marker=".",
             s=2,
             vmin=vmin,
@@ -407,9 +411,9 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
 
         ax[0, 1].set_title("Average PSF Model")
         cax = cax = ax[0, 1].scatter(
-            phi_b,
-            r_b,
-            c=np.log10(m),
+            phi_b[nan_mask],
+            r_b[nan_mask],
+            c=np.log10(m)[nan_mask],
             marker=".",
             s=2,
             vmin=vmin,
@@ -418,29 +422,10 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
         fig.colorbar(cax, ax=ax[0, 1])
         ax[0, 1].set_xlabel(r"$\phi$ [rad]")
 
-        ax[0, 2].set_title("Average PSF Model (grid)")
-        r_test, phi_test = np.meshgrid(
-            np.linspace(0 ** 0.5, ylim ** 0.5, 500) ** 2,
-            np.linspace(-np.pi + 1e-5, np.pi - 1e-5, 500),
-        )
-        A_test = make_A(phi_test.ravel(), r_test.ravel())
-        model_test = A_test.dot(psf_w)
-        model_test = model_test.reshape(phi_test.shape)
-        cax = ax[0, 2].pcolormesh(
-            phi_test,
-            r_test,
-            model_test,
-            shading="auto",
-            vmax=vmax,
-            vmin=vmin,
-        )
-        fig.colorbar(cax, ax=ax[0, 2])
-        ax[0, 2].set_xlabel(r"$\phi$ [rad]")
-
         cax = ax[1, 0].scatter(
-            source_mask.multiply(dx).data,
-            source_mask.multiply(dy).data,
-            c=mean_f,
+            source_mask.multiply(dx).data[nan_mask],
+            source_mask.multiply(dy).data[nan_mask],
+            c=mean_f[nan_mask],
             marker=".",
             s=2,
             vmin=vmin,
@@ -451,9 +436,9 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
         ax[1, 0].set_xlabel("dx")
 
         cax = cax = ax[1, 1].scatter(
-            source_mask.multiply(dx).data,
-            source_mask.multiply(dy).data,
-            c=np.log10(m),
+            source_mask.multiply(dx).data[nan_mask],
+            source_mask.multiply(dy).data[nan_mask],
+            c=np.log10(m)[nan_mask],
             marker=".",
             s=2,
             vmin=vmin,
@@ -462,20 +447,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
         fig.colorbar(cax, ax=ax[1, 1])
         ax[1, 1].set_xlabel("dx")
 
-        x_test = r_test * np.cos(phi_test)
-        y_test = r_test * np.sin(phi_test)
-        cax = ax[1, 2].pcolormesh(
-            x_test,
-            y_test,
-            model_test,
-            shading="auto",
-            vmax=vmax,
-            vmin=vmin,
-        )
-        fig.colorbar(cax, ax=ax[1, 2])
-        ax[1, 2].set_xlabel("dx")
-
-        fig_name = "%s/data/ffi/%i/channel_%i_psf_model.png" % (
+        fig_name = "%s/figures/ffi/%i/channel_%i_psf_model.png" % (
             path,
             args.quarter,
             args.channel,
@@ -483,23 +455,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
 
         plt.savefig(fig_name, format="png", bbox_inches="tight")
         plt.clf()
-
-        to_save = dict(
-            x_test=x_test,
-            y_test=y_test,
-            model_test=model_test,
-            x_model=source_mask.multiply(dx).data,
-            y_model=source_mask.multiply(dy).data,
-            f_model=np.log10(m),
-            mean_f=mean_f,
-        )
-        output = "%s/data/ffi/%i/channel_%i_psf_model_grid.pkl" % (
-            path,
-            args.quarter,
-            args.channel,
-        )
-        with open(output, "wb") as file:
-            pickle.dump(to_save, file)
+        plt.close()
 
     return mean_model
 
@@ -580,23 +536,21 @@ def run_code(Q=5, CH=1):
         fig.colorbar(im, label=r"Flux ($e^{-}s^{-1}$)")
 
         plt.title("FFI Ch %i" % (CH))
-        ax.set_xlabel("RA [deg]")
-        ax.set_ylabel("Dec [deg]")
+        ax.set_xlabel("R.A. [hh:mm]")
+        ax.set_ylabel("Decl. [deg]")
         ax.grid(color="white", ls="solid")
         ax.set_aspect("equal", adjustable="box")
 
-        ax.scatter(
-            _sources.ra,
-            _sources.dec,
-            facecolors="none",
-            edgecolors="r",
-            linewidths=1,
-            transform=ax.get_transform("icrs"),
-        )
+        # ax.scatter(
+        #     _sources.ra,
+        #     _sources.dec,
+        #     facecolors="none",
+        #     edgecolors="r",
+        #     linewidths=1,
+        #     transform=ax.get_transform("icrs"),
+        # )
 
-        ax.set_ylabel("Row pixels")
-        ax.set_xlabel("Column pixels")
-        fig_name = "%s/data/ffi/%i/channel_%i_image_gaia_sources.png" % (path, Q, CH)
+        fig_name = "%s/figures/ffi/%i/channel_%i_image_gaia_sources.png" % (path, Q, CH)
 
         plt.savefig(fig_name, format="png", bbox_inches="tight")
         plt.clf()
@@ -623,17 +577,6 @@ def run_code(Q=5, CH=1):
         # _sources = sample_sources(_sources)
         print("New number of sources (subsample): ", _sources.shape)
 
-        if args.plot:
-            plt.hist(np.log10(_sources.phot_g_mean_flux), bins=200, label="sample")
-            plt.yscale("log")
-            plt.xlabel("Gaia flux [log]")
-            plt.legend(loc="upper right")
-
-            fig_name = "%s/data/ffi/%i/channel_%i_gaia_flux_dist.png" % (path, Q, CH)
-
-            plt.savefig(fig_name, format="png", bbox_inches="tight")
-            plt.clf()
-
     # create dx, dy, gf, r, phi, vectors
     # gaia estimate flux values per pixel to be used as flux priors
     print("Computing dx, dy, gf...")
@@ -655,6 +598,11 @@ def run_code(Q=5, CH=1):
     gf = _sources["phot_g_mean_flux"].values
     dflux = sparse_mask.multiply(_flux).tocsr()
 
+    # eliminate leaked zero flux values in the sparse_mask
+    sparse_mask = dflux.astype(bool)
+    dx = sparse_mask.multiply(dx).tocsr()
+    dy = sparse_mask.multiply(dy).tocsr()
+
     # convertion to polar coordinates
     print("to polar coordinates...")
     nnz_inds = sparse_mask.nonzero()
@@ -670,7 +618,7 @@ def run_code(Q=5, CH=1):
 
     # compute PSF edge model
     print("Computing PSF edges...")
-    radius = find_psf_edge(r, dflux, gf, radius_limit=6, cut=300, dm_type=args.dm_type)
+    radius = find_psf_edge(r, dflux, gf, radius_limit=6, cut=200, dm_type=args.dm_type)
 
     # compute PSF model
     print("Computing PSF model...")
