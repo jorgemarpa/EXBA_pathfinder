@@ -542,12 +542,12 @@ def run_code(Q=5, CH=1):
         ax.set_aspect("equal", adjustable="box")
 
         # ax.scatter(
-        #     _sources.ra,
-        #     _sources.dec,
+        #     _sources.col,
+        #     _sources.row,
         #     facecolors="none",
         #     edgecolors="r",
-        #     linewidths=1,
-        #     transform=ax.get_transform("icrs"),
+        #     linewidths=.5,
+        #     alpha=.5,
         # )
 
         fig_name = "%s/figures/ffi/%i/channel_%i_image_gaia_sources.png" % (path, Q, CH)
