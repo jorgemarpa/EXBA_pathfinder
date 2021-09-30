@@ -70,6 +70,7 @@ r_min, r_max = 20, 1044
 c_min, c_max = 12, 1112
 
 remove_sat = True
+mask_bright = True
 sample_sources = False
 N_sample = 5000
 
@@ -140,10 +141,10 @@ def clean_source_list(sources):
 
     print("Cleaning sources table:")
     # remove bright/faint objects
-    sources = sources[
-        (sources.phot_g_mean_flux > 1e3) & (sources.phot_g_mean_flux < 1e6)
-    ].reset_index(drop=True)
-    print(sources.shape)
+    # sources = sources[
+    #     (sources.phot_g_mean_flux > 1e3) & (sources.phot_g_mean_flux < 1e6)
+    # ].reset_index(drop=True)
+    # print(sources.shape)
 
     # find well separated sources
     s_coords = SkyCoord(sources.ra, sources.dec, unit=("deg"))
@@ -202,9 +203,22 @@ def _saturated_pixels_mask(flux, column, row, saturation_limit=1.5e5):
     return m
 
 
+def _mask_bright_sources(column, row, sources, mag_limit=10):
+    """Finds and removes halos produced by bright stars (<10 mag)"""
+    bright_mask = sources["phot_g_mean_mag"] <= mag_limit
+    mask_radius = 30  # Pixels
+
+    mask = [
+        np.hypot(column - s.col, row - s.row) < mask_radius
+        for _, s in sources[bright_mask].iterrows()
+    ]
+    mask = np.array(mask).sum(axis=0) > 0
+
+    return mask
+
+
 def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"):
 
-    # remove pixels with r > 6.
     nonz_idx = r.nonzero()
     rad_mask = r.data < radius_limit
     temp_mask = sparse.csr_matrix(
@@ -212,7 +226,8 @@ def find_psf_edge(r, mean_flux, gf, radius_limit=6, cut=300, dm_type="cuadratic"
         shape=r.shape,
     ).astype(bool)
     temp_mask.eliminate_zeros()
-    # temp_mask = temp_mask.multiply(temp_mask.sum(axis=0) == 1).tocsr()
+    temp_mask = temp_mask.multiply(temp_mask.sum(axis=0) == 1).tocsr()
+    temp_mask.eliminate_zeros()
 
     with np.errstate(divide="ignore", invalid="ignore"):
         f = np.log10(temp_mask.astype(float).multiply(mean_flux).data)
@@ -344,12 +359,14 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
     )
     phi_b = source_mask.multiply(phi).data
     r_b = source_mask.multiply(r).data
+    print("# Fitting with data points: ", (r_b.shape))
 
     # build a design matrix A with b-splines basis in radius and angle axis.
     A = make_A(phi_b.ravel(), r_b.ravel())
     prior_sigma = np.ones(A.shape[1]) * 100
     prior_mu = np.zeros(A.shape[1])
     nan_mask = np.isfinite(mean_f.ravel())
+    print("DM matrix shape: ", A.shape)
 
     # we solve for A * psf_w = mean_f
     for count in [0, 1]:
@@ -419,6 +436,7 @@ def build_psf_model(r, phi, mean_flux, flux_estimates, radius, dx, dy):
             vmin=vmin,
             vmax=vmax,
         )
+        ax[0, 1].set_ylim(0, ylim)
         fig.colorbar(cax, ax=ax[0, 1])
         ax[0, 1].set_xlabel(r"$\phi$ [rad]")
 
@@ -521,8 +539,7 @@ def run_code(Q=5, CH=1):
     _dec = _dec_2d.ravel()
     _flux = _flux_2d.ravel()
 
-    print("New shape is:", _col_2d.shape)
-    print("New shape is (ravel):", _col.shape)
+    print("Total pixels in image:", _col.shape)
 
     if args.plot:
         fig = plt.figure(figsize=(16, 8))
@@ -531,7 +548,7 @@ def run_code(Q=5, CH=1):
             _flux_2d,
             cmap=plt.cm.viridis,
             origin="lower",
-            norm=colors.SymLogNorm(linthresh=20, vmin=0, vmax=2000, base=10),
+            norm=colors.SymLogNorm(linthresh=200, vmin=0, vmax=2000, base=10),
         )
         fig.colorbar(im, label=r"Flux ($e^{-}s^{-1}$)")
 
@@ -559,6 +576,7 @@ def run_code(Q=5, CH=1):
         non_sat_mask = ~_saturated_pixels_mask(
             _flux, _col, _row, saturation_limit=1.5e5
         )
+        print("Saturated pixels %i" % (np.sum(~non_sat_mask)))
 
         _col = _col[non_sat_mask]
         _row = _row[non_sat_mask]
@@ -566,7 +584,20 @@ def run_code(Q=5, CH=1):
         _dec = _dec[non_sat_mask]
         _flux = _flux[non_sat_mask]
 
-        print("New shape is (non-sat): ", _col.shape)
+    if mask_bright:
+        bright_mask = ~_mask_bright_sources(_col, _row, _sources, mag_limit=10)
+        print("Bright pixels %i" % (np.sum(~bright_mask)))
+
+        _col = _col[bright_mask]
+        _row = _row[bright_mask]
+        _ra = _ra[bright_mask]
+        _dec = _dec[bright_mask]
+        _flux = _flux[bright_mask]
+
+    _sources = _sources[
+        (_sources.phot_g_mean_flux > 1e3) & (_sources.phot_g_mean_flux < 1e6)
+    ].reset_index(drop=True)
+    print("Total Gaia sources %i" % (_sources.shape[0]))
 
     if sample_sources:
         if args.plot:

@@ -87,10 +87,10 @@ WHERE phot_g_mean_mag<={magnitude_limit}
     return gd.data.to_pandas()
 
 
-def make_A_edges(r, f, type="cuadratic"):
+def make_A_edges(r, f, type="quadratic"):
     if type == "linear":
         A = np.vstack([r ** 0, r, f]).T
-    elif type == "cuadratic":
+    elif type == "quadratic":
         A = np.vstack([r ** 0, r, r ** 2, f]).T
     elif type == "cubic":
         A = np.vstack([r ** 0, r, r ** 2, r ** 3, f]).T
@@ -356,16 +356,18 @@ def clean_aperture_mask(mask):
     return mask
 
 
-def make_A(phi, r, cut_r=5):
-    """ Make spline design matrix in polar coordinates """
-    phi_spline = sparse.csr_matrix(wrapped_spline(phi, order=3, nknots=12).T)
+def make_A(phi, r, cut_r=5, phiknots=12, rknots=4):
+    """
+    Make spline design matrix in polar coordinates
+    """
+    phi_spline = sparse.csr_matrix(wrapped_spline(phi, order=3, nknots=phiknots).T)
     if r.max() > 4.0:
-        upp_knot = 4.0
+        up_knot = 4.0
     elif r.max() > 3.0:
-        upp_knot = 3.0
+        up_knot = 3.0
     else:
-        upp_knot = np.percentile(r, 95)
-    r_knots = np.linspace(0.125 ** 0.5, upp_knot ** 0.5, 10) ** 2
+        up_knot = np.percentile(r, 98)
+    r_knots = np.linspace(0.125 ** 0.5, up_knot ** 0.5, rknots) ** 2
     r_spline = sparse.csr_matrix(
         np.asarray(
             dmatrix(

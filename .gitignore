@@ -2,8 +2,6 @@
 .virtual_documents/
 data/*
 data
-figures/*
-figures
 exba/.python-version
 .python-version
 exba/__pycache__*
